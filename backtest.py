@@ -1,5 +1,5 @@
 """
-Offline Backtest and Stress Testing Module (SPEC v5.5).
+Offline Backtest and Stress Testing Module (SPEC v5.7).
 Implements close-only 1h matching, training/test set partition, and 4 stress test suites.
 No external network calls; uses local CSV data.
 """
@@ -165,6 +165,8 @@ class BacktestEngine:
         self.pre_trade_max_dd: float = 0.0
         self.post_halt_max_dd: float = 0.0
         self.closed_groups: List[Dict[str, Any]] = []
+        self.regime: Dict[str, Optional[str]] = {"BTCUSDT": None, "ETHUSDT": None}
+        self.prev_regime: Dict[str, Optional[str]] = {"BTCUSDT": None, "ETHUSDT": None}
 
     def evaluate_symbol_price(
         self,
@@ -445,6 +447,21 @@ class BacktestEngine:
                 self._record_equity(current_dt, current_eq)
                 return
 
+        # (b2) Market Trend Regime Determination (§4.3, §5.0(b2))
+        if not stress_test_mode:
+            for sym in ["BTCUSDT", "ETHUSDT"]:
+                inds = indicator_data.get(sym, {})
+                adx = inds.get("adx")
+                p_di = inds.get("plus_di")
+                m_di = inds.get("minus_di")
+                r24 = inds.get("ret24")
+                if adx is not None and p_di is not None and m_di is not None and r24 is not None:
+                    self.regime[sym] = engine.classify_regime(adx, p_di, m_di, r24, self.prev_regime.get(sym))
+                    self.prev_regime[sym] = self.regime[sym]
+                else:
+                    self.regime[sym] = None
+                    block_trading[sym] = True
+
         # 4. In-group Exits (Non-stress mode only)
         if not stress_test_mode and not self.halt_active and self.halt_state == "NONE":
             for sym in ["BTCUSDT", "ETHUSDT"]:
@@ -574,9 +591,9 @@ class BacktestEngine:
         if not open_layers:
             return
 
-        # HOLDMAX variant (§5.3): fully-filled (6/6 bought) groups skip time stops and hold for recovery.
+        # HOLDMAX variant (§5.3): fully-filled (9/9 bought) groups skip time stops and hold for recovery.
         _bought = sum(1 for l in grp["layers"] if l["status"] in ("OPEN", "SOLD", "TIME_STOPPED"))
-        fully_filled = getattr(config, "HOLDMAX_EXEMPT_TIME_STOP", True) and (_bought >= 6)
+        fully_filled = getattr(config, "HOLDMAX_EXEMPT_TIME_STOP", True) and (_bought >= config.MAX_LAYERS)
 
         # Priority 2: 14 Days Time Stop (§5.0(c) / §5.3)
         if (not fully_filled) and current_dt - first_buy_dt >= timedelta(days=config.TIME_STOP_14D_DAYS):
@@ -592,12 +609,13 @@ class BacktestEngine:
             self.groups[sym] = None
             return
 
-        # Priority 3: Group TP (+1.5%)
+        # Priority 3: Group TP (+1.5%, or +0.8% in REBOUND)
         if not skip_tp:
             total_qty = sum(l["qty"] for l in open_layers)
             total_cost = sum(l["qty"] * l["buy_price"] for l in open_layers)
             avg_cost = total_cost / total_qty if total_qty > 0 else 0.0
-            if px >= avg_cost * (1.0 + config.GROUP_TP_PCT):
+            tp_coeff = config.REBOUND_TP_COEFF if self.regime.get(sym) == "REBOUND" else (1.0 + config.GROUP_TP_PCT)
+            if px >= avg_cost * tp_coeff:
                 for lay in open_layers:
                     self._sell_layer(grp, lay, sym, px, current_dt, "GROUP_TP", "SOLD")
                 grp["status"] = "CLOSED"
@@ -613,8 +631,8 @@ class BacktestEngine:
         # Priority 4: 7 Days Time Stop (Half) (§5.0(c) / §5.3)
         if (not fully_filled) and grp.get("half_time_stopped", 0) == 0 and (current_dt - first_buy_dt >= timedelta(days=config.TIME_STOP_7D_DAYS)):
             open_sorted_desc = sorted(open_layers, key=lambda l: l["layer_no"], reverse=True)
-            total_open_planned = sum(engine.get_layer_planned_notional(sym, l["layer_no"]) for l in open_layers)
-            target_cut = total_open_planned * 0.50
+            total_open_actual = sum(l["notional"] for l in open_layers)
+            target_cut = total_open_actual * 0.50
             cum_cut = 0.0
             layers_to_sell = []
             if len(open_layers) == 1:
@@ -622,7 +640,7 @@ class BacktestEngine:
             else:
                 for lay in open_sorted_desc:
                     layers_to_sell.append(lay)
-                    cum_cut += engine.get_layer_planned_notional(sym, lay["layer_no"])
+                    cum_cut += lay["notional"]
                     if cum_cut >= target_cut:
                         break
 
@@ -668,7 +686,7 @@ class BacktestEngine:
         sym = grp["symbol"]
         c = grp["center_price"]
 
-        # Stop adding condition: px < 0.85 * C
+        # Stop adding condition: px < 0.80 * C (§4.2, v5.7)
         if px < c * config.STOP_ADDING_DROP_PCT:
             grp["stop_adding"] = 1
             for play in grp["layers"]:
@@ -677,6 +695,22 @@ class BacktestEngine:
             return
 
         if grp.get("stop_adding", 0) == 1:
+            return
+
+        current_regime = self.regime.get(sym)
+        if current_regime == "STRONG_DOWN":
+            return
+
+        if current_regime == "SLOW_DOWN":
+            bought_dts = [l["bought_dt"] for l in grp["layers"] if l["layer_no"] >= 2 and l.get("bought_dt") is not None]
+            if bought_dts:
+                last_dt = max(bought_dts)
+                if (current_dt - last_dt).total_seconds() < config.SLOW_DOWN_COOLDOWN_SECS:
+                    return
+
+        dd = (c - px) / c
+        mult, permitted = engine.get_dynamic_multiplier(dd, current_regime)
+        if not permitted or mult is None:
             return
 
         pending_layers = [l for l in grp["layers"] if l["status"] == "PENDING"]
@@ -688,16 +722,27 @@ class BacktestEngine:
 
             trig = play["trigger_price"]
             if px < trig:
-                planned_notional = engine.get_layer_planned_notional(sym, lno)
-                qty, actual_notional = engine.compute_order_qty(sym, planned_notional, px)
-                if actual_notional < config.MIN_NOTIONAL_USDT:
-                    continue
+                prev_lay = next((l for l in grp["layers"] if l["layer_no"] == lno - 1), None)
+                if prev_lay is None or prev_lay.get("planned_notional") is None:
+                    logger.error("Group %s layer %d prev planned_notional is None (NULL fallback)", grp.get("id"), lno)
+                    grp["stop_adding"] = 1
+                    for rem_lay in grp["layers"]:
+                        if rem_lay["status"] == "PENDING":
+                            rem_lay["status"] = "CANCELLED"
+                    break
+
+                prev_planned = prev_lay["planned_notional"]
+                planned_notional = round(prev_planned * mult, 2)
 
                 tot_deployed = self.get_deployed_basis()
                 sym_deployed = self.get_deployed_basis(sym)
                 sym_cap = config.BTC_CAP_USDT if sym == "BTCUSDT" else config.ETH_CAP_USDT
+                tot_rem = max(0.0, config.TOTAL_DEPLOYED_CAP_USDT - tot_deployed)
+                sym_rem = max(0.0, sym_cap - sym_deployed)
+                trunc_planned = min(planned_notional, tot_rem, sym_rem)
 
-                if (tot_deployed + actual_notional > config.TOTAL_DEPLOYED_CAP_USDT) or (sym_deployed + actual_notional > sym_cap):
+                qty, actual_notional = engine.compute_order_qty(sym, trunc_planned, px)
+                if trunc_planned < config.MIN_NOTIONAL_USDT or actual_notional < config.MIN_NOTIONAL_USDT or qty <= 0:
                     play["status"] = "CANCELLED"
                     grp["stop_adding"] = 1
                     for rem_lay in grp["layers"]:
@@ -713,6 +758,7 @@ class BacktestEngine:
                 play["buy_price"] = px
                 play["qty"] = qty
                 play["notional"] = actual_notional
+                play["planned_notional"] = planned_notional
                 play["buy_fee"] = fee
                 play["buy_slippage"] = slippage
                 play["bought_dt"] = current_dt
@@ -731,6 +777,9 @@ class BacktestEngine:
                     'layer_no': lno,
                     'reason': 'LAYER_BUY'
                 })
+
+                if current_regime == "SLOW_DOWN":
+                    break
             else:
                 break
 
@@ -754,7 +803,7 @@ class BacktestEngine:
         if not (cond1 and cond2 and cond3):
             return
 
-        planned_l1 = engine.get_layer_planned_notional(symbol, 1)
+        planned_l1 = config.BTC_LAYER_NOTIONALS[0] if symbol == "BTCUSDT" else config.ETH_LAYER_NOTIONALS[0]
         qty, actual_l1 = engine.compute_order_qty(symbol, planned_l1, px)
         if actual_l1 < config.MIN_NOTIONAL_USDT:
             return
@@ -779,6 +828,7 @@ class BacktestEngine:
             'buy_price': px,
             'qty': qty,
             'notional': actual_l1,
+            'planned_notional': planned_l1,
             'buy_fee': fee,
             'buy_slippage': slippage,
             'status': 'OPEN',
@@ -924,6 +974,8 @@ def precompute_series_indicators(bars: List[Dict[str, Any]]) -> List[Dict[str, A
             minus_dms[i] = dn
 
     adx_arr = [None] * n
+    plus_di_arr = [None] * n
+    minus_di_arr = [None] * n
     if n >= 28:
         smooth_tr = [None] * n
         smooth_pdm = [None] * n
@@ -940,10 +992,14 @@ def precompute_series_indicators(bars: List[Dict[str, Any]]) -> List[Dict[str, A
         for i in range(14, n):
             tr_val = smooth_tr[i]
             if tr_val == 0:
+                plus_di_arr[i] = 0.0
+                minus_di_arr[i] = 0.0
                 dx[i] = 0.0
                 continue
             p_di = 100.0 * (smooth_pdm[i] / tr_val)
             m_di = 100.0 * (smooth_mdm[i] / tr_val)
+            plus_di_arr[i] = p_di
+            minus_di_arr[i] = m_di
             s = p_di + m_di
             dx[i] = 100.0 * abs(p_di - m_di) / s if s != 0 else 0.0
 
@@ -955,9 +1011,13 @@ def precompute_series_indicators(bars: List[Dict[str, Any]]) -> List[Dict[str, A
     res = [None] * n
     W = config.RANGE_WINDOW_BARS # 480
     for i in range(n):
+        ret24 = (closes[i] / closes[i - 24] - 1.0) if i >= 24 else None
         if i < config.MIN_KLINES_BARS - 1: # Requires at least 500 valid closed bars (§3.4, §7.1)
             res[i] = {
                 'adx': None,
+                'plus_di': None,
+                'minus_di': None,
+                'ret24': None,
                 'atr': None,
                 'atr_pct': None,
                 'hh_480': None,
@@ -980,6 +1040,9 @@ def precompute_series_indicators(bars: List[Dict[str, Any]]) -> List[Dict[str, A
 
         res[i] = {
             'adx': adx_arr[i],
+            'plus_di': plus_di_arr[i],
+            'minus_di': minus_di_arr[i],
+            'ret24': ret24,
             'atr': atrs[i],
             'atr_pct': atrs[i] / closes[i] if closes[i] else 0.0,
             'hh_480': hh,
@@ -1147,9 +1210,9 @@ def _run_synthetic_holding_test(
     """
     Deterministic holding stress test (§8.2).
     Start state:
-    Hour 0: All 6 layers bought at trigger prices.
-    BTC d=1.5%: L1 C, L2 0.985C, L3 0.97C, L4 0.955C, L5 0.94C, L6 0.925C
-    ETH d=2.0%: L1 C, L2 0.98C, L3 0.96C, L4 0.94C, L5 0.92C, L6 0.90C
+    Hour 0: All 9 layers bought at trigger prices.
+    BTC d=2.0%: L1 C, L2 0.98C, L3 0.96C, L4 0.94C, L5 0.92C, L6 0.90C, L7 0.88C, L8 0.86C, L9 0.84C
+    ETH d=2.5%: L1 C, L2 0.975C, L3 0.95C, L4 0.925C, L5 0.90C, L6 0.875C, L7 0.85C, L8 0.825C, L9 0.80C
     """
     start_dt = datetime(2025, 1, 1, 0, 0, tzinfo=timezone.utc)
     eng = BacktestEngine(events)
@@ -1176,7 +1239,7 @@ def _run_synthetic_holding_test(
 
     for sym, center_px, d, notionals, step in symbols_to_init:
         layers = []
-        for lno in range(1, 7):
+        for lno in range(1, config.MAX_LAYERS + 1):
             trig = center_px * (1.0 - (lno - 1) * d)
             plan_notional = notionals[lno - 1]
             qty = plan_notional / trig
@@ -1190,6 +1253,7 @@ def _run_synthetic_holding_test(
                 'buy_price': trig,
                 'qty': qty,
                 'notional': actual_notional,
+                'planned_notional': plan_notional,
                 'buy_fee': fee,
                 'buy_slippage': slip,
                 'status': 'OPEN',
@@ -1203,7 +1267,7 @@ def _run_synthetic_holding_test(
             'status': 'OPEN',
             'opened_dt': start_dt,
             'first_buy_dt': start_dt,
-            'stop_adding': 1, # Already 6 layers
+            'stop_adding': 1, # Already 9 layers
             'half_time_stopped': 0,
             'layers': layers
         }
@@ -1276,7 +1340,7 @@ def _run_synthetic_split_test(
         ('ETHUSDT', eth_c, eth_d, config.ETH_LAYER_NOTIONALS, config.MIN_QTY_ETH)
     ]:
         layers = []
-        for lno in range(1, 7):
+        for lno in range(1, config.MAX_LAYERS + 1):
             trig = center_px * (1.0 - (lno - 1) * d)
             plan_notional = notionals[lno - 1]
             qty = plan_notional / trig
@@ -1290,6 +1354,7 @@ def _run_synthetic_split_test(
                 'buy_price': trig,
                 'qty': qty,
                 'notional': actual_notional,
+                'planned_notional': plan_notional,
                 'buy_fee': fee,
                 'buy_slippage': slip,
                 'status': 'OPEN',
@@ -1303,7 +1368,7 @@ def _run_synthetic_split_test(
             'status': 'OPEN',
             'opened_dt': start_dt,
             'first_buy_dt': start_dt,
-            'stop_adding': 1,
+            'stop_adding': 1,  # Already 9 layers
             'half_time_stopped': 0,
             'layers': layers
         }

@@ -1,5 +1,5 @@
 """
-Engine module for Spot Martingale (SPEC v5.1).
+Engine module for Spot Martingale (SPEC v5.7).
 Contains database schema, models, technical indicators, accounting invariants,
 suspicious price state machine, and risk management logic.
 """
@@ -83,6 +83,7 @@ CREATE TABLE IF NOT EXISTS layers (
     buy_price REAL,
     qty REAL,
     notional_usdt REAL,
+    planned_notional_usdt REAL,
     buy_fee_usdt REAL,
     buy_slippage_usdt REAL,
     status TEXT NOT NULL, -- PENDING / OPEN / SOLD / TIME_STOPPED / CANCELLED / HALT_CLOSED
@@ -105,7 +106,7 @@ CREATE TABLE IF NOT EXISTS trades (
     slippage_usdt REAL NOT NULL,
     group_id INTEGER NOT NULL,
     layer_no INTEGER NOT NULL,
-    reason TEXT NOT NULL -- GROUP_OPEN / LAYER_BUY / LAYER_TP / GROUP_TP / ALL_SOLD / TIME_STOP_7D / TIME_STOP_14D / DRAWDOWN_HALT
+    reason TEXT NOT NULL -- GROUP_OPEN / LAYER_BUY / LAYER_TP / GROUP_TP / ALL_SOLD / TIME_STOP_7D / TIME_STOP_14D / DRAWDOWN_HALT / TRANSITION_CLOSE
 );
 
 CREATE TABLE IF NOT EXISTS daily_summary (
@@ -133,7 +134,11 @@ CREATE TABLE IF NOT EXISTS regime_log (
     in_range INTEGER,
     event_in_24h INTEGER,
     event_in_past_2h INTEGER,
-    allow_new_group INTEGER
+    allow_new_group INTEGER,
+    regime TEXT,
+    ret24_pct REAL,
+    plus_di REAL,
+    minus_di REAL
 );
 """
 
@@ -143,12 +148,27 @@ def get_db_connection(db_path=config.DB_PATH, timeout=config.SQLITE_LOCK_TIMEOUT
     return conn
 
 def init_db(db_path=config.DB_PATH):
-    """Initialize tables and default single-row state if not already initialized."""
+    """Initialize tables and default single-row state if not already initialized, with idempotent migrations."""
     conn = get_db_connection(db_path)
     with conn:
         conn.executescript(SCHEMA_SQL)
-        now_str = datetime.now(timezone.utc).isoformat()
         cur = conn.cursor()
+
+        # Idempotent migrations for existing tables (§6.1)
+        # 1. layers.planned_notional_usdt
+        cur.execute("PRAGMA table_info(layers)")
+        layer_cols = [r["name"] for r in cur.fetchall()]
+        if "planned_notional_usdt" not in layer_cols:
+            cur.execute("ALTER TABLE layers ADD COLUMN planned_notional_usdt REAL")
+
+        # 2. regime_log columns: regime, ret24_pct, plus_di, minus_di
+        cur.execute("PRAGMA table_info(regime_log)")
+        regime_cols = [r["name"] for r in cur.fetchall()]
+        for col, col_type in [("regime", "TEXT"), ("ret24_pct", "REAL"), ("plus_di", "REAL"), ("minus_di", "REAL")]:
+            if col not in regime_cols:
+                cur.execute(f"ALTER TABLE regime_log ADD COLUMN {col} {col_type}")
+
+        now_str = datetime.now(timezone.utc).isoformat()
         cur.execute("SELECT id FROM account WHERE id = 1")
         if not cur.fetchone():
             cur.execute("""
@@ -202,6 +222,9 @@ def calculate_indicators(klines_1h: List[List[Any]]) -> Dict[str, Any]:
     if n < config.MIN_KLINES_BARS:
         return {
             'adx': None,
+            'plus_di': None,
+            'minus_di': None,
+            'ret24': None,
             'atr': None,
             'atr_pct': None,
             'hh_480': None,
@@ -257,15 +280,21 @@ def calculate_indicators(klines_1h: List[List[Any]]) -> Dict[str, Any]:
         smooth_plus_dm[i] = smooth_plus_dm[i - 1] - (smooth_plus_dm[i - 1] / 14.0) + plus_dms[i]
         smooth_minus_dm[i] = smooth_minus_dm[i - 1] - (smooth_minus_dm[i - 1] / 14.0) + minus_dms[i]
 
-    # DX
+    # DX and Wilder's +DI/-DI Exposure (§3.4, v5.7)
+    plus_di_arr = [None] * n
+    minus_di_arr = [None] * n
     dx = [None] * n
     for i in range(14, n):
         tr_val = smooth_tr[i]
         if tr_val == 0:
+            plus_di_arr[i] = 0.0
+            minus_di_arr[i] = 0.0
             dx[i] = 0.0
             continue
         plus_di = 100.0 * (smooth_plus_dm[i] / tr_val)
         minus_di = 100.0 * (smooth_minus_dm[i] / tr_val)
+        plus_di_arr[i] = plus_di
+        minus_di_arr[i] = minus_di
         di_sum = plus_di + minus_di
         if di_sum == 0:
             dx[i] = 0.0
@@ -297,10 +326,16 @@ def calculate_indicators(klines_1h: List[List[Any]]) -> Dict[str, Any]:
     current_atr = atrs[-1]
     current_adx = adx_arr[-1]
 
+    # RET24 (§3.4): close[-1] / close[-25] - 1 (requires at least 25 closed bars)
+    ret24 = (closes[-1] / closes[-25] - 1.0) if (n >= 25 and closes[-25] != 0) else None
+
     in_range = (ll_480 < current_close < hh_480)
 
     return {
         'adx': current_adx,
+        'plus_di': plus_di_arr[-1] if n >= 28 else None,
+        'minus_di': minus_di_arr[-1] if n >= 28 else None,
+        'ret24': ret24,
         'atr': current_atr,
         'atr_pct': current_atr / current_close if current_close else 0.0,
         'hh_480': hh_480,
@@ -426,17 +461,63 @@ def check_event_filter(
     return event_in_24h, event_in_past_2h, False, None
 
 # ---------------------------------------------------------
-# Sizing, Notional & Accounting Invariants (§1.3, §1.4, §2)
+# Sizing, Dynamic Multiplier & Accounting Invariants (§1.3, §1.4, §2, §4.3)
 # ---------------------------------------------------------
 
-def get_layer_planned_notional(symbol: str, layer_no: int) -> float:
-    """Return authoritative planned notional for symbol and layer (1-indexed)."""
-    if symbol == "BTCUSDT":
-        return config.BTC_LAYER_NOTIONALS[layer_no - 1]
-    elif symbol == "ETHUSDT":
-        return config.ETH_LAYER_NOTIONALS[layer_no - 1]
+def classify_regime(
+    adx: Optional[float],
+    plus_di: Optional[float],
+    minus_di: Optional[float],
+    ret24: Optional[float],
+    prev_regime: Optional[str] = None
+) -> Optional[str]:
+    """
+    Classify market trend regime (§4.3) using 4-state priority waterfall + REVERSAL logging:
+    1. STRONG_DOWN: ADX >= 25 and -DI > +DI and RET24 <= -5% (-0.05)
+    2. SLOW_DOWN: ADX >= 25 and -DI > +DI (RET24 > -5% guaranteed by not 1)
+    3. REBOUND: ADX < 25 and RET24 >= +3% (+0.03)
+    4. RANGING: all other cases (default)
+    REVERSAL: transition label if prev_regime in (STRONG_DOWN, SLOW_DOWN)
+              and waterfall is RANGING and +DI > -DI.
+    Returns None if any required indicator is None.
+    """
+    if adx is None or plus_di is None or minus_di is None or ret24 is None:
+        return None
+
+    if adx >= config.REGIME_ADX_THRESHOLD and minus_di > plus_di and ret24 <= config.STRONG_DOWN_RET24:
+        return "STRONG_DOWN"
+    if adx >= config.REGIME_ADX_THRESHOLD and minus_di > plus_di:
+        return "SLOW_DOWN"
+    if adx < config.REGIME_ADX_THRESHOLD and ret24 >= config.REBOUND_RET24:
+        return "REBOUND"
+
+    # Waterfall default is RANGING; check for REVERSAL transition tag (§4.3)
+    if prev_regime in ("STRONG_DOWN", "SLOW_DOWN") and plus_di > minus_di:
+        return "REVERSAL"
+    return "RANGING"
+
+def get_dynamic_multiplier(dd: float, regime: Optional[str] = None) -> Tuple[Optional[float], bool]:
+    """
+    Determine dynamic multiplier and check whether adding is permitted (§2, §3.2, §7.1):
+    - DD < 2%: 1.2
+    - 2% <= DD < 5%: 1.3
+    - 5% <= DD < 10%: 1.4
+    - 10% <= DD <= 20%: 1.5 (permitted only when regime != STRONG_DOWN)
+    - DD > 20%: None, stop adding
+    Returns (multiplier, is_permitted).
+    """
+    if dd < 0.02:
+        return config.MULT_DD_LT_2, True
+    elif dd < 0.05:
+        return config.MULT_DD_2_5, True
+    elif dd < 0.10:
+        return config.MULT_DD_5_10, True
+    elif dd <= 0.20:
+        if regime == "STRONG_DOWN":
+            return config.MULT_DD_10_20, False
+        return config.MULT_DD_10_20, True
     else:
-        raise ValueError(f"Unknown symbol {symbol}")
+        return None, False
 
 def compute_order_qty(symbol: str, planned_notional: float, price: float) -> Tuple[float, float]:
     """
@@ -513,7 +594,7 @@ def compute_grid_spacing(symbol: str, atr: float, center_price: float) -> float:
         raise ValueError(f"Unknown symbol {symbol}")
 
 def compute_trigger_price(center_price: float, spacing_d: float, layer_no: int) -> float:
-    """Trigger price for layer n (n=2..6) = C * (1 - (n - 1) * d). Layer 1 = C."""
+    """Trigger price for layer n (n=2..9) = C * (1 - (n - 1) * d). Layer 1 = C."""
     if layer_no == 1:
         return center_price
     return center_price * (1.0 - (layer_no - 1) * spacing_d)

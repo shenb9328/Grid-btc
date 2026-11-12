@@ -33,19 +33,19 @@ class TestSpecV51Requirements(unittest.TestCase):
         eth_sum = round(sum(config.ETH_LAYER_NOTIONALS), 2)
         self.assertEqual(btc_sum, 3000.00, f"BTC layer sum {btc_sum} != 3000.00")
         self.assertEqual(eth_sum, 2000.00, f"ETH layer sum {eth_sum} != 2000.00")
-        self.assertEqual(len(config.BTC_LAYER_NOTIONALS), 6)
-        self.assertEqual(len(config.ETH_LAYER_NOTIONALS), 6)
+        self.assertEqual(len(config.BTC_LAYER_NOTIONALS), 9)
+        self.assertEqual(len(config.ETH_LAYER_NOTIONALS), 9)
 
     # -------------------------------------------------------------
-    # 2. 层数上限 6 不可突破
+    # 2. 层数上限 9 不可突破
     # -------------------------------------------------------------
-    def test_item_02_max_layers_capped_at_six(self):
-        self.assertEqual(config.MAX_LAYERS, 6)
-        # Attempting layer 7 should raise or not exist
+    def test_item_02_max_layers_capped_at_nine(self):
+        self.assertEqual(config.MAX_LAYERS, 9)
+        # Attempting layer 10 (index 9) should raise or not exist
         with self.assertRaises(IndexError):
-            _ = config.BTC_LAYER_NOTIONALS[6]
+            _ = config.BTC_LAYER_NOTIONALS[9]
         with self.assertRaises(IndexError):
-            _ = config.ETH_LAYER_NOTIONALS[6]
+            _ = config.ETH_LAYER_NOTIONALS[9]
 
         conn = engine.get_db_connection(self.db_path)
         cur = conn.cursor()
@@ -55,7 +55,7 @@ class TestSpecV51Requirements(unittest.TestCase):
             VALUES ('BTCUSDT', 50000.0, 0.015, 0.01, 'OPEN', '2026-11-06T00:00:00Z')
         """)
         gid = cur.lastrowid
-        for lno in range(1, 7):
+        for lno in range(1, 10):
             cur.execute("""
                 INSERT INTO layers (group_id, layer_no, trigger_price, status)
                 VALUES (?, ?, ?, 'PENDING')
@@ -64,7 +64,7 @@ class TestSpecV51Requirements(unittest.TestCase):
 
         # Count layers for this group
         cur.execute("SELECT COUNT(*) as cnt FROM layers WHERE group_id = ?", (gid,))
-        self.assertEqual(cur.fetchone()["cnt"], 6)
+        self.assertEqual(cur.fetchone()["cnt"], 9)
         conn.close()
 
     # -------------------------------------------------------------
@@ -366,10 +366,10 @@ class TestSpecV51Requirements(unittest.TestCase):
         """)
         gid = cur.lastrowid
         cur.execute("""
-            INSERT INTO layers (group_id, layer_no, trigger_price, buy_price, qty, notional_usdt, buy_fee_usdt, buy_slippage_usdt, status)
-            VALUES (?, 1, 50000.0, 50000.0, 0.004, 200.0, 0.2, 0.04, 'OPEN')
+            INSERT INTO layers (group_id, layer_no, trigger_price, buy_price, qty, notional_usdt, buy_fee_usdt, buy_slippage_usdt, status, planned_notional_usdt)
+            VALUES (?, 1, 50000.0, 50000.0, 0.004, 200.0, 0.2, 0.04, 'OPEN', 200.0)
         """, (gid,))
-        for lno in range(2, 7):
+        for lno in range(2, 10):
             trig = 50000.0 * (1.0 - (lno - 1) * 0.015)
             cur.execute("INSERT INTO layers (group_id, layer_no, trigger_price, status) VALUES (?, ?, ?, 'PENDING')", (gid, lno, trig))
         cur.execute("UPDATE account SET cash_usdt = 10000.0 - 200.24 WHERE id = 1")
@@ -448,12 +448,12 @@ class TestSpecV51Requirements(unittest.TestCase):
             VALUES ('BTCUSDT', 50000.0, 0.015, 0.01, 'OPEN', '2026-11-06T00:00:00Z', '2026-11-06T00:00:00Z')
         """)
         gid = cur.lastrowid
-        # Set Layer 1 to already have deployed 2900 USDT (close to 3000 cap)
+        # Set Layer 1 to already have deployed 2998 USDT (leaves only 2 USDT < 5 USDT cap, triggering truncation cap rejection)
         cur.execute("""
-            INSERT INTO layers (group_id, layer_no, trigger_price, buy_price, qty, notional_usdt, buy_fee_usdt, buy_slippage_usdt, status)
-            VALUES (?, 1, 50000.0, 50000.0, 0.058, 2900.0, 2.9, 0.58, 'OPEN')
+            INSERT INTO layers (group_id, layer_no, trigger_price, buy_price, qty, notional_usdt, buy_fee_usdt, buy_slippage_usdt, status, planned_notional_usdt)
+            VALUES (?, 1, 50000.0, 50000.0, 0.05996, 2998.0, 2.998, 0.5996, 'OPEN', 2998.0)
         """, (gid,))
-        # Layer 2 notional is 305.74 -> 2900 + 305.74 > 3000.0 BTC cap!
+        # Layer 2 triggers but trunc_planned = 3000 - 2998 = 2.0 < 5.0 -> cap rejection
         cur.execute("INSERT INTO layers (group_id, layer_no, trigger_price, status) VALUES (?, 2, 49250.0, 'PENDING')", (gid,))
         cur.execute("INSERT INTO layers (group_id, layer_no, trigger_price, status) VALUES (?, 3, 48500.0, 'PENDING')", (gid,))
         conn.commit()
@@ -581,7 +581,7 @@ class TestSpecV51Requirements(unittest.TestCase):
         # (B) P2-2: Element-level frozen config check
         orig_btc_layers = list(config.BTC_LAYER_NOTIONALS)
         try:
-            config.BTC_LAYER_NOTIONALS = [200.00, 300.00, 449.70, 629.58, 809.46, 611.26]  # still sums to 3000.00
+            config.BTC_LAYER_NOTIONALS = [100.0, 100.0, 200.0, 300.0, 300.0, 400.0, 500.0, 500.0, 600.0]  # 9 items, still sums to 3000.00
             self.assertFalse(config.verify_frozen_config())
         finally:
             config.BTC_LAYER_NOTIONALS = orig_btc_layers

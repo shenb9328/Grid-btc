@@ -1,6 +1,6 @@
 """
 Configuration for Spot Martingale (Binance Spot · DRY_RUN simulation)
-Frozen under SPEC v5.1 (2026-11-06).
+Frozen under SPEC v5.7 (2026-11-12).
 Strict equality check with frozen value table on startup; mismatch causes sys.exit(1).
 """
 
@@ -28,13 +28,19 @@ ETH_CAP_USDT = 2000.0
 TOTAL_DEPLOYED_CAP_USDT = 5000.0
 
 # Layer Parameters (§2)
-MAX_LAYERS = 6
+MAX_LAYERS = 9
 MULTIPLIER = 1.3
-S = 12.75603
+S = 32.01499791
 
-# Authoritative layer notionals (§2, half-up rounding, 6th layer residual)
-BTC_LAYER_NOTIONALS = [235.18, 305.74, 397.46, 516.70, 671.71, 873.21]
-ETH_LAYER_NOTIONALS = [156.79, 203.83, 264.97, 344.46, 447.80, 582.15]
+# Dynamic Multiplier Ladders (§2, §3.2, §7.1)
+MULT_DD_LT_2 = 1.2
+MULT_DD_2_5 = 1.3
+MULT_DD_5_10 = 1.4
+MULT_DD_10_20 = 1.5
+
+# Authoritative layer notionals (§2, half-up rounding, 9th layer residual)
+BTC_LAYER_NOTIONALS = [93.71, 121.82, 158.36, 205.87, 267.63, 347.92, 452.30, 587.99, 764.40]
+ETH_LAYER_NOTIONALS = [62.47, 81.21, 105.58, 137.25, 178.42, 231.95, 301.53, 391.99, 509.60]
 
 # 3. Grid Spacing & Take Profit (§3.2, §3.3)
 BTC_SPACING_COEFF = 2.0
@@ -47,7 +53,7 @@ ETH_SPACING_MAX = 0.040
 
 GROUP_TP_PCT = 0.015  # +1.5%
 
-# 4. Market Regime & Indicators (§3.4, §4.1)
+# 4. Market Regime & Indicators (§3.4, §4.1, §4.3)
 ADX_THRESHOLD = 25.0  # < 25
 ATR_MEDIAN_MULTIPLIER = 2.0  # < 2.0
 RANGE_WINDOW_BARS = 480
@@ -55,12 +61,18 @@ MIN_KLINES_BARS = 500
 ATR_FIRST_BAR_INDEX = 14
 ADX_FIRST_BAR_INDEX = 28
 
+REGIME_ADX_THRESHOLD = 25.0
+STRONG_DOWN_RET24 = -0.05
+REBOUND_RET24 = 0.03
+REBOUND_TP_COEFF = 1.008
+SLOW_DOWN_COOLDOWN_SECS = 86400
+
 EVENT_WINDOW_PRE_HOURS = 24.0  # future 24 hours (inclusive)
 EVENT_WINDOW_POST_HOURS = 2.0  # past 2 hours (exclusive)
 EVENT_STALE_DAYS = 90
 
 # 5. Risk, Price Feed & Halt (§4.2, §5.1, §5.2, §5.3)
-STOP_ADDING_DROP_PCT = 0.85  # price < 0.85 * C
+STOP_ADDING_DROP_PCT = 0.80  # price < 0.80 * C
 SERVER_TIME_MAX_DRIFT_SEC = 60.0  # <= 60s
 SUSPECT_PRICE_JUMP_PCT = 0.10  # > 10%
 SUSPECT_PRICE_KLINE_CLOSE_PCT = 0.05  # <= 5%
@@ -109,11 +121,15 @@ FROZEN_VALUES = {
     "BTC_CAP_USDT": 3000.0,
     "ETH_CAP_USDT": 2000.0,
     "TOTAL_DEPLOYED_CAP_USDT": 5000.0,
-    "MAX_LAYERS": 6,
+    "MAX_LAYERS": 9,
     "MULTIPLIER": 1.3,
-    "S": 12.75603,
-    "BTC_LAYER_NOTIONALS": [235.18, 305.74, 397.46, 516.70, 671.71, 873.21],
-    "ETH_LAYER_NOTIONALS": [156.79, 203.83, 264.97, 344.46, 447.80, 582.15],
+    "S": 32.01499791,
+    "MULT_DD_LT_2": 1.2,
+    "MULT_DD_2_5": 1.3,
+    "MULT_DD_5_10": 1.4,
+    "MULT_DD_10_20": 1.5,
+    "BTC_LAYER_NOTIONALS": [93.71, 121.82, 158.36, 205.87, 267.63, 347.92, 452.30, 587.99, 764.40],
+    "ETH_LAYER_NOTIONALS": [62.47, 81.21, 105.58, 137.25, 178.42, 231.95, 301.53, 391.99, 509.60],
     "BTC_SPACING_COEFF": 2.0,
     "BTC_SPACING_MIN": 0.008,
     "BTC_SPACING_MAX": 0.030,
@@ -127,10 +143,15 @@ FROZEN_VALUES = {
     "MIN_KLINES_BARS": 500,
     "ATR_FIRST_BAR_INDEX": 14,
     "ADX_FIRST_BAR_INDEX": 28,
+    "REGIME_ADX_THRESHOLD": 25.0,
+    "STRONG_DOWN_RET24": -0.05,
+    "REBOUND_RET24": 0.03,
+    "REBOUND_TP_COEFF": 1.008,
+    "SLOW_DOWN_COOLDOWN_SECS": 86400,
     "EVENT_WINDOW_PRE_HOURS": 24.0,
     "EVENT_WINDOW_POST_HOURS": 2.0,
     "EVENT_STALE_DAYS": 90,
-    "STOP_ADDING_DROP_PCT": 0.85,
+    "STOP_ADDING_DROP_PCT": 0.80,
     "SERVER_TIME_MAX_DRIFT_SEC": 60.0,
     "SUSPECT_PRICE_JUMP_PCT": 0.10,
     "SUSPECT_PRICE_KLINE_CLOSE_PCT": 0.05,

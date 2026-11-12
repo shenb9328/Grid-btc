@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Spot Martingale Monitor (Binance Spot · Simulation DRY_RUN)
-Frozen under SPEC v5.1.
+Frozen under SPEC v5.7.
 Polls Binance public market data every 60s, executes simulation grid matching,
 and persists state to SQLite database.
 """
@@ -16,6 +16,7 @@ import logging
 import urllib.request
 import urllib.error
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
 
 import config
@@ -124,25 +125,28 @@ class BinancePublicClient:
 
 
 class SpotMartingaleMonitor:
-    def __init__(self, db_path=config.DB_PATH):
-        self.db_path = db_path
+    def __init__(self, db_path=None):
+        self.db_path = Path(db_path) if db_path is not None else Path(config.DB_PATH)
         self.client = BinancePublicClient()
         self.events_version = None
         self.events_sha = None
         self.events: List[Tuple[datetime, str, str, str]] = []
+        self.prev_valid_regime: Dict[str, Optional[str]] = {"BTCUSDT": None, "ETHUSDT": None}
 
     def startup_checks(self):
-        logger.info("Performing startup checks under SPEC v5.1...")
+        logger.info("Performing startup checks under SPEC v5.7...")
         if not config.verify_frozen_config():
             logger.error("Startup frozen configuration verification failed. Exiting immediately.")
             sys.exit(1)
 
-        # Database verification
+        # Database verification and schema migrations (§6.1)
         if not self.db_path.exists():
             logger.info("Database file not found. Initializing new database at %s", self.db_path)
             engine.init_db(self.db_path)
         else:
             try:
+                # Run idempotent schema migrations on existing database (§6.1)
+                engine.init_db(self.db_path)
                 conn = engine.get_db_connection(self.db_path)
                 with conn:
                     cur = conn.cursor()
@@ -150,6 +154,16 @@ class SpotMartingaleMonitor:
                     if not cur.fetchone():
                         logger.error("Database account table corrupted: row 1 missing.")
                         sys.exit(1)
+                    # Restore previous valid regime from latest non-null regime_log entry (§6.1)
+                    for sym in ["BTCUSDT", "ETHUSDT"]:
+                        cur.execute("""
+                            SELECT regime FROM regime_log
+                            WHERE symbol = ? AND regime IS NOT NULL
+                            ORDER BY rowid DESC LIMIT 1
+                        """, (sym,))
+                        r = cur.fetchone()
+                        if r and r["regime"]:
+                            self.prev_valid_regime[sym] = r["regime"]
                 conn.close()
             except Exception as e:
                 logger.error("Database open or integrity check failed: %s. Prohibiting trading and exiting.", e)
@@ -167,6 +181,59 @@ class SpotMartingaleMonitor:
             sys.exit(1)
 
         logger.info("Startup checks passed successfully.")
+
+    def _check_and_execute_transition_close(self):
+        """
+        Transition closing (SPEC §9 Rule 18(d)):
+        When v5.7 starts for the first time, if any legacy v5.6 OPEN group exists,
+        sell all its OPEN layers at market price (reason=TRANSITION_CLOSE),
+        cancel PENDING layers (if any), and mark group as CLOSED (close_reason=TRANSITION_CLOSE).
+        Cash and realized PnL roll over; account is not reset.
+        Idempotent: does not trigger on groups already CLOSED.
+        """
+        if not self.db_path.exists():
+            return
+        conn = engine.get_db_connection(self.db_path)
+        with conn:
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM grid_groups WHERE status = 'OPEN'")
+            open_groups = [dict(r) for r in cur.fetchall()]
+            for grp in open_groups:
+                gid = grp["id"]
+                sym = grp["symbol"]
+                cur.execute("SELECT COUNT(*) as total_cnt, MAX(layer_no) as max_l FROM layers WHERE group_id = ?", (gid,))
+                row = cur.fetchone()
+                total_cnt = row["total_cnt"] or 0
+                max_l = row["max_l"] or 0
+                # v5.6 groups have at most 6 layers in the database
+                if total_cnt <= 6 or max_l <= 6:
+                    logger.info("Legacy v5.6 OPEN group %d (%s, total_layers=%d) detected. Executing transition close.", gid, sym, total_cnt)
+                    now_utc = datetime.now(timezone.utc)
+                    px, _ = self.client.get_ticker_price(sym)
+                    if px is None or px <= 0:
+                        cur.execute("SELECT last_valid_price FROM symbol_state WHERE symbol = ?", (sym,))
+                        s_row = cur.fetchone()
+                        px = s_row["last_valid_price"] if s_row else None
+
+                    cur.execute("SELECT * FROM layers WHERE group_id = ? AND status = 'OPEN' ORDER BY layer_no ASC", (gid,))
+                    open_layers = [dict(r) for r in cur.fetchall()]
+
+                    for lay in open_layers:
+                        sell_px = px if (px is not None and px > 0) else lay["buy_price"]
+                        self._sell_layer(conn, lay, sym, sell_px, now_utc, "TRANSITION_CLOSE", layer_status="SOLD")
+
+                    cur.execute("UPDATE layers SET status = 'CANCELLED' WHERE group_id = ? AND status = 'PENDING'", (gid,))
+                    cur.execute(
+                        "UPDATE grid_groups SET status = 'CLOSED', close_reason = 'TRANSITION_CLOSE', closed_utc = ? WHERE id = ?",
+                        (now_utc.isoformat(), gid)
+                    )
+                    engine.assert_cash_invariant(conn)
+                    logger.info("Legacy v5.6 group %d closed via TRANSITION_CLOSE.", gid)
+        conn.close()
+
+    def execute_transition_close(self):
+        """Public alias for transition close (§9 Rule 18(d))."""
+        return self._check_and_execute_transition_close()
 
     def poll_once(self, now_utc: datetime, now_monotonic: float):
         """Execute one complete polling cycle strictly following SPEC v5.1 §5.0."""
@@ -262,6 +329,7 @@ class SpotMartingaleMonitor:
         symbols = ["BTCUSDT", "ETHUSDT"]
         sym_states = {}
         valuation_prices = {}
+        symbol_klines = {}
         block_trading = {}  # Flag indicating whether opening/adding is prohibited for symbol this round
         skip_tp = {}        # Flag indicating whether TP judgment is skipped for symbol this round
 
@@ -278,6 +346,7 @@ class SpotMartingaleMonitor:
                 raw_price, p_err = self.client.get_ticker_price(sym)
 
             klines, k_err = self.client.get_recent_closed_klines(sym, config.MIN_KLINES_BARS)
+            symbol_klines[sym] = klines
             latest_kline_close = float(klines[-1][4]) if klines and len(klines) > 0 else None
 
             # Handle price validity & state transitions
@@ -531,6 +600,54 @@ class SpotMartingaleMonitor:
                 self._end_round_bookkeeping(conn, valuation_prices, now_utc, now_monotonic)
                 return
 
+        # --- (b2) Market Trend Regime Determination & Logging (§4.3, §5.0(b2)) ---
+        current_regimes = {}
+        for sym in symbols:
+            klines = symbol_klines.get(sym)
+            inds = engine.calculate_indicators(klines) if klines else {}
+            adx = inds.get("adx")
+            plus_di = inds.get("plus_di")
+            minus_di = inds.get("minus_di")
+            ret24 = inds.get("ret24")
+
+            regime = None
+            if adx is not None and plus_di is not None and minus_di is not None and ret24 is not None:
+                regime = engine.classify_regime(adx, plus_di, minus_di, ret24, self.prev_valid_regime.get(sym))
+                self.prev_valid_regime[sym] = regime
+            else:
+                # Indicator unavailable: keep prev_valid_regime unchanged, prohibit opening and adding (§4.3)
+                block_trading[sym] = True
+
+            current_regimes[sym] = regime
+
+            # Check allow_new_group (§4.1)
+            cond1 = (adx is not None and adx < config.ADX_THRESHOLD)
+            cond2 = inds.get("in_range", False)
+            atr = inds.get("atr")
+            atr_med = inds.get("atr_median_480")
+            cond3 = (atr is not None and atr_med is not None and atr < config.ATR_MEDIAN_MULTIPLIER * atr_med)
+            ev_24h, ev_past_2h, is_stale, ev_err = engine.check_event_filter(self.events, now_utc)
+            cond4 = (not ev_24h and not ev_past_2h and not is_stale)
+            allow_new = int(cond1 and cond2 and cond3 and cond4 and not block_trading[sym] and not daily_loss_blocked)
+
+            cur.execute("""
+                INSERT INTO regime_log (
+                    utc, symbol, adx, atr_pct, in_range,
+                    event_in_24h, event_in_past_2h, allow_new_group,
+                    regime, ret24_pct, plus_di, minus_di
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                now_utc.isoformat(), sym, adx, inds.get("atr_pct"), int(cond2),
+                int(ev_24h), int(ev_past_2h), allow_new,
+                regime, ret24, plus_di, minus_di
+            ))
+            if not allow_new and not (cond1 and cond2 and cond3 and cond4):
+                self._log_risk_event(
+                    conn, now_utc.isoformat(), "REGIME_BLOCK",
+                    f"{sym} blocked: adx_ok={cond1}, range_ok={cond2}, atr_ok={cond3}, event_ok={cond4}"
+                )
+        conn.commit()
+
         # --- (c) In-group Exits & (d) Buys ---
         if halt_active == 0 and halt_state == "NONE":
             # For each symbol, process open group exits and buys
@@ -543,7 +660,8 @@ class SpotMartingaleMonitor:
                     group = dict(group_row)
                     self._process_group_exits_and_adds(
                         conn, group, val_px, now_utc, time_jump,
-                        block_trading[sym], skip_tp[sym], daily_loss_blocked
+                        block_trading[sym], skip_tp[sym], daily_loss_blocked,
+                        current_regime=current_regimes.get(sym)
                     )
                 else:
                     # No open group: consider opening group if allowed
@@ -662,7 +780,8 @@ class SpotMartingaleMonitor:
 
     def _process_group_exits_and_adds(
         self, conn: sqlite3.Connection, group: Dict[str, Any], val_px: Optional[float],
-        now_utc: datetime, time_jump: bool, block_trading: bool, skip_tp: bool, daily_loss_blocked: bool
+        now_utc: datetime, time_jump: bool, block_trading: bool, skip_tp: bool, daily_loss_blocked: bool,
+        current_regime: Optional[str] = None
     ):
         cur = conn.cursor()
         gid = group["id"]
@@ -677,13 +796,13 @@ class SpotMartingaleMonitor:
         first_buy_dt = datetime.fromisoformat(first_buy_str.replace("Z", "+00:00")).astimezone(timezone.utc) if first_buy_str else now_utc
 
         # HOLDMAX guard (§5.3): bought_layers = layers with status in OPEN, SOLD, TIME_STOPPED
-        # When bought_layers == 6, skip 7d half and 14d liquidation, keep holding without setting half_time_stopped or stop_adding
+        # When bought_layers == 9, skip 7d half and 14d liquidation, keep holding without setting half_time_stopped or stop_adding
         cur.execute("""
             SELECT COUNT(*) as cnt FROM layers
             WHERE group_id = ? AND status IN ('OPEN', 'SOLD', 'TIME_STOPPED')
         """, (gid,))
         bought_layers = cur.fetchone()["cnt"]
-        fully_filled = getattr(config, "HOLDMAX_EXEMPT_TIME_STOP", True) and (bought_layers == 6)
+        fully_filled = getattr(config, "HOLDMAX_EXEMPT_TIME_STOP", True) and (bought_layers == config.MAX_LAYERS)
 
         # Check exit conditions in order of §5.0(c) priority
         # Priority 2: 14 Days Time Stop
@@ -698,13 +817,14 @@ class SpotMartingaleMonitor:
             engine.assert_cash_invariant(conn)
             return
 
-        # Priority 3: Group Take Profit (+1.5%)
+        # Priority 3: Group Take Profit (+1.5%, or +0.8% in REBOUND)
         if not skip_tp and open_layers:
             total_qty = sum(l["qty"] for l in open_layers)
             total_cost = sum(l["qty"] * l["buy_price"] for l in open_layers)
             avg_cost = total_cost / total_qty if total_qty > 0 else 0.0
-            if val_px >= avg_cost * (1.0 + config.GROUP_TP_PCT):
-                logger.info("Group %d achieved group TP +1.5%% (val_px=%.2f >= avg=%.2f * 1.015). Closing group.", gid, val_px, avg_cost)
+            tp_coeff = config.REBOUND_TP_COEFF if current_regime == "REBOUND" else (1.0 + config.GROUP_TP_PCT)
+            if val_px >= avg_cost * tp_coeff:
+                logger.info("Group %d achieved group TP (val_px=%.2f >= avg=%.2f * %.4f, regime=%s). Closing group.", gid, val_px, avg_cost, tp_coeff, current_regime)
                 with conn:
                     for lay in open_layers:
                         self._sell_layer(conn, lay, sym, val_px, now_utc, "GROUP_TP", layer_status="SOLD")
@@ -717,10 +837,10 @@ class SpotMartingaleMonitor:
         # Priority 4: 7 Days Time Stop (Half, execute once)
         if (not fully_filled) and (not time_jump) and group.get("half_time_stopped", 0) == 0 and (now_utc - first_buy_dt >= timedelta(days=config.TIME_STOP_7D_DAYS)):
             logger.info("Group %d reached 7-day time stop. Halving positions.", gid)
-            # Sell from highest layer_no down to lowest layer_no until cumulative planned notional >= 50% of current open layers planned notional
+            # Sell from highest layer_no down to lowest layer_no until cumulative actual notional >= 50% of current open layers actual notional (§5.3)
             open_sorted_desc = sorted(open_layers, key=lambda l: l["layer_no"], reverse=True)
-            total_open_planned = sum(engine.get_layer_planned_notional(sym, l["layer_no"]) for l in open_layers)
-            target_cut = total_open_planned * 0.50
+            total_open_actual = sum(l["notional_usdt"] for l in open_layers)
+            target_cut = total_open_actual * 0.50
             cum_cut = 0.0
             layers_to_sell = []
             if len(open_layers) == 1:
@@ -728,7 +848,7 @@ class SpotMartingaleMonitor:
             else:
                 for lay in open_sorted_desc:
                     layers_to_sell.append(lay)
-                    cum_cut += engine.get_layer_planned_notional(sym, lay["layer_no"])
+                    cum_cut += lay["notional_usdt"]
                     if cum_cut >= target_cut:
                         break
 
@@ -772,21 +892,44 @@ class SpotMartingaleMonitor:
         if block_trading or daily_loss_blocked:
             return
 
-        # Check Stop Adding condition: last price < 0.85 * C
+        # Check Stop Adding condition: last price < 0.80 * C (§4.2, v5.7)
         c = group["center_price"]
         if val_px < c * config.STOP_ADDING_DROP_PCT:
             if group.get("stop_adding", 0) == 0:
-                logger.info("Price %.2f < 0.85 * C (%.2f) for group %d. Setting stop_adding=1 and cancelling PENDING layers.", val_px, c * 0.85, gid)
+                logger.info("Price %.2f < 0.80 * C (%.2f) for group %d. Setting stop_adding=1 and cancelling PENDING layers.", val_px, c * config.STOP_ADDING_DROP_PCT, gid)
                 with conn:
                     cur.execute("UPDATE grid_groups SET stop_adding = 1 WHERE id = ?", (gid,))
                     cur.execute("UPDATE layers SET status = 'CANCELLED' WHERE group_id = ? AND status = 'PENDING'", (gid,))
                     self._log_risk_event(
                         conn, now_utc.isoformat(), "STOP_ADDING",
-                        f"{sym} group {gid} price {val_px:.2f} < 0.85*C ({c * config.STOP_ADDING_DROP_PCT:.2f})"
+                        f"{sym} group {gid} price {val_px:.2f} < 0.80*C ({c * config.STOP_ADDING_DROP_PCT:.2f})"
                     )
                 return
 
         if group.get("stop_adding", 0) == 1:
+            return
+
+        # Market regime checks on adding (§4.3)
+        if current_regime == "STRONG_DOWN":
+            logger.info("Group %d adding skipped: STRONG_DOWN active (PENDING retained)", gid)
+            return
+
+        if current_regime == "SLOW_DOWN":
+            cur.execute("""
+                SELECT MAX(bought_utc) as last_buy FROM layers
+                WHERE group_id = ? AND layer_no >= 2 AND status IN ('OPEN', 'SOLD', 'TIME_STOPPED')
+            """, (gid,))
+            r = cur.fetchone()
+            if r and r["last_buy"]:
+                last_buy_dt = datetime.fromisoformat(r["last_buy"].replace("Z", "+00:00")).astimezone(timezone.utc)
+                if (now_utc - last_buy_dt).total_seconds() < config.SLOW_DOWN_COOLDOWN_SECS:
+                    logger.info("Group %d adding skipped: SLOW_DOWN cooldown active (< 86400s)", gid)
+                    return
+
+        # Group drawdown DD and dynamic multiplier ladder (§2, §3.2)
+        dd = (c - val_px) / c
+        mult, permitted = engine.get_dynamic_multiplier(dd, current_regime)
+        if not permitted or mult is None:
             return
 
         # Check pending layers sequentially to support multi-layer plunge in a single round (§3.2)
@@ -805,14 +948,22 @@ class SpotMartingaleMonitor:
 
             trig_px = play["trigger_price"]
             if val_px < trig_px:
-                # Attempt to buy layer
-                planned_notional = engine.get_layer_planned_notional(sym, lno)
-                qty, actual_notional = engine.compute_order_qty(sym, planned_notional, val_px)
-                if actual_notional < config.MIN_NOTIONAL_USDT:
-                    logger.warning("Layer %d actual notional %.2f < 5.00 USDT. Skipping layer.", lno, actual_notional)
-                    continue
+                # Recursive planned notional from layer n-1 planned_notional_usdt (§2, §6.1, §9 Rule 19)
+                cur.execute("SELECT planned_notional_usdt FROM layers WHERE group_id = ? AND layer_no = ?", (gid, lno - 1))
+                prev_row = cur.fetchone()
+                if prev_row is None or prev_row["planned_notional_usdt"] is None:
+                    # NULL fallback per §6.1, §8.3(6):
+                    logger.error("Group %d layer %d: prev planned_notional_usdt is NULL! Triggering NULL fallback.", gid, lno)
+                    with conn:
+                        cur.execute("UPDATE grid_groups SET stop_adding = 1 WHERE id = ?", (gid,))
+                        cur.execute("UPDATE layers SET status = 'CANCELLED' WHERE group_id = ? AND status = 'PENDING'", (gid,))
+                        self._log_risk_event(conn, now_utc.isoformat(), "STOP_ADDING", f"{sym} group {gid} layer {lno} NULL planned notional fallback")
+                    break
 
-                # Check caps (§2)
+                prev_planned = prev_row["planned_notional_usdt"]
+                planned_notional = round(prev_planned * mult, 2)
+
+                # Check caps and truncate (§2)
                 cur.execute("SELECT SUM(qty * buy_price) as deployed FROM layers WHERE status = 'OPEN'")
                 tot_deployed = cur.fetchone()["deployed"] or 0.0
 
@@ -824,9 +975,14 @@ class SpotMartingaleMonitor:
                 sym_deployed = cur.fetchone()["sym_deployed"] or 0.0
 
                 sym_cap = config.BTC_CAP_USDT if sym == "BTCUSDT" else config.ETH_CAP_USDT
-                if (tot_deployed + actual_notional > config.TOTAL_DEPLOYED_CAP_USDT) or (sym_deployed + actual_notional > sym_cap):
-                    logger.error("Cap exceeded on layer %d buy! tot=%.2f+%.2f>5000 or sym=%.2f+%.2f>%.2f. Rejecting buy and cancelling remaining PENDING layers.",
-                                 lno, tot_deployed, actual_notional, sym_deployed, actual_notional, sym_cap)
+                tot_rem = max(0.0, config.TOTAL_DEPLOYED_CAP_USDT - tot_deployed)
+                sym_rem = max(0.0, sym_cap - sym_deployed)
+                trunc_planned = min(planned_notional, tot_rem, sym_rem)
+
+                qty, actual_notional = engine.compute_order_qty(sym, trunc_planned, val_px)
+                if trunc_planned < config.MIN_NOTIONAL_USDT or actual_notional < config.MIN_NOTIONAL_USDT or qty <= 0:
+                    logger.error("Cap exceeded on layer %d buy! trunc=%.2f, actual=%.2f. Rejecting buy and cancelling remaining PENDING layers.",
+                                 lno, trunc_planned, actual_notional)
                     with conn:
                         cur.execute("UPDATE layers SET status = 'CANCELLED' WHERE id = ?", (play["id"],))
                         cur.execute("UPDATE grid_groups SET stop_adding = 1 WHERE id = ?", (gid,))
@@ -850,9 +1006,9 @@ class SpotMartingaleMonitor:
                     cur.execute("""
                         UPDATE layers
                         SET status = 'OPEN', buy_price = ?, qty = ?, notional_usdt = ?,
-                            buy_fee_usdt = ?, buy_slippage_usdt = ?, bought_utc = ?
+                            planned_notional_usdt = ?, buy_fee_usdt = ?, buy_slippage_usdt = ?, bought_utc = ?
                         WHERE id = ?
-                    """, (val_px, qty, actual_notional, fee, slippage, now_utc.isoformat(), play["id"]))
+                    """, (val_px, qty, actual_notional, planned_notional, fee, slippage, now_utc.isoformat(), play["id"]))
 
                     cur.execute("""
                         INSERT INTO trades (
@@ -863,7 +1019,11 @@ class SpotMartingaleMonitor:
 
                     cur.execute("UPDATE account SET cash_usdt = cash_usdt - ? WHERE id = 1", (total_cash_out,))
                 engine.assert_cash_invariant(conn)
-                logger.info("Bought layer %d for group %d: qty=%.4f @ %.2f (notional=%.2f)", lno, gid, qty, val_px, actual_notional)
+                logger.info("Bought layer %d for group %d: qty=%.4f @ %.2f (notional=%.2f, planned=%.2f)", lno, gid, qty, val_px, actual_notional, planned_notional)
+
+                # In SLOW_DOWN regime, max 1 layer can be added per round (§3.2, §4.3)
+                if current_regime == "SLOW_DOWN":
+                    break
             else:
                 break
 
@@ -901,6 +1061,7 @@ class SpotMartingaleMonitor:
         """, (net_cash_in, realized))
 
     def _consider_open_new_group(self, conn: sqlite3.Connection, symbol: str, val_px: Optional[float], now_utc: datetime):
+        cur = conn.cursor()
         if val_px is None:
             return
 
@@ -931,27 +1092,11 @@ class SpotMartingaleMonitor:
         ev_24h, ev_past_2h, is_stale, ev_err = engine.check_event_filter(self.events, now_utc)
         cond4 = (not ev_24h and not ev_past_2h and not is_stale)
 
-        # Log regime
-        cur = conn.cursor()
-        allow_new = int(cond1 and cond2 and cond3 and cond4)
-        cur.execute("""
-            INSERT INTO regime_log (
-                utc, symbol, adx, atr_pct, in_range,
-                event_in_24h, event_in_past_2h, allow_new_group
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (now_utc.isoformat(), symbol, adx, inds["atr_pct"], int(cond2), int(ev_24h), int(ev_past_2h), allow_new))
-        if not allow_new:
-            self._log_risk_event(
-                conn, now_utc.isoformat(), "REGIME_BLOCK",
-                f"{symbol} blocked: adx_ok={cond1}, range_ok={cond2}, atr_ok={cond3}, event_ok={cond4}"
-            )
-        conn.commit()
-
         if not (cond1 and cond2 and cond3 and cond4):
             return
 
         # Check capital caps for layer 1 (§2, §3.1)
-        planned_l1 = engine.get_layer_planned_notional(symbol, 1)
+        planned_l1 = config.BTC_LAYER_NOTIONALS[0] if symbol == "BTCUSDT" else config.ETH_LAYER_NOTIONALS[0]
         qty, actual_l1 = engine.compute_order_qty(symbol, planned_l1, val_px)
         if actual_l1 < config.MIN_NOTIONAL_USDT:
             logger.warning("Layer 1 notional %.2f < 5.00 USDT. Do not open group.", actual_l1)
@@ -991,16 +1136,16 @@ class SpotMartingaleMonitor:
             """, (symbol, val_px, d, inds["atr_pct"], now_utc.isoformat(), now_utc.isoformat()))
             gid = cur.lastrowid
 
-            # Insert all 6 layers: Layer 1 is OPEN, Layers 2..6 are PENDING
+            # Insert all 9 layers: Layer 1 is OPEN, Layers 2..9 are PENDING (§8.3(6))
             # Layer 1
             cur.execute("""
                 INSERT INTO layers (
                     group_id, layer_no, trigger_price, buy_price, qty, notional_usdt,
-                    buy_fee_usdt, buy_slippage_usdt, status, bought_utc
-                ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, 'OPEN', ?)
-            """, (gid, val_px, val_px, qty, actual_l1, fee, slippage, now_utc.isoformat()))
+                    planned_notional_usdt, buy_fee_usdt, buy_slippage_usdt, status, bought_utc
+                ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?)
+            """, (gid, val_px, val_px, qty, actual_l1, planned_l1, fee, slippage, now_utc.isoformat()))
 
-            # Layers 2..6
+            # Layers 2..9 (PENDING rows do not write planned_notional_usdt, remains NULL)
             for lno in range(2, config.MAX_LAYERS + 1):
                 trig = engine.compute_trigger_price(val_px, d, lno)
                 cur.execute("""
@@ -1073,14 +1218,16 @@ class SpotMartingaleMonitor:
         conn.commit()
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description="Spot Martingale Monitor (Binance Spot · DRY_RUN)")
     parser.add_argument("--once", action="store_true", help="Run a single poll cycle and exit")
     parser.add_argument("--rounds", type=int, default=None, help="Run N poll cycles and exit")
-    args = parser.parse_args()
+    parser.add_argument("--db", type=str, default=None, help="Database path override")
+    args = parser.parse_args(argv)
 
-    monitor = SpotMartingaleMonitor()
+    monitor = SpotMartingaleMonitor(db_path=args.db)
     monitor.startup_checks()
+    monitor.execute_transition_close()
 
     logger.info("Spot Martingale Monitor initialized in DRY_RUN mode.")
 

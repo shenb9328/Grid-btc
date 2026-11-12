@@ -1,6 +1,6 @@
 # 校验清单（CHECKSUMS）
 
-导出日期：2026-11-12。代码、测试、数据与评审文件与原始项目文件**逐字节一致**，只有一个例外：15 个 SPEC 文件中各 1 行的看板主机名被替换为 `[dashboard-host-redacted]`（脱敏，见 §1）。除此之外，本仓库的全部原始文件均可直接用 md5 比对验证。
+导出日期：2026-11-12（第一次导出 v5.6 + v5.7 草案；同日第二次导出更新至 v5.7 冻结版 + 修复后代码）。代码、测试、数据与评审文件与原始项目文件**逐字节一致**，只有一个例外：20 个 SPEC 文件中各 1 行的看板主机名被替换为 `[dashboard-host-redacted]`（脱敏，见 §1）。除此之外，本仓库的全部原始文件均可直接用 md5 比对验证。
 
 验证命令（在仓库根目录）：
 
@@ -15,7 +15,8 @@ sha256sum results/backtest_v56_frozen_bt.log
 
 | 文件 | 原始 md5（脱敏前） | 本仓库 md5（脱敏后） |
 |---|---|---|
-| `spec.md`（冻结 v5.6） | `79eabf69bb27ec30530073a166c54194` | `c4f7f8ceb91592e64d3b0e7a389e0580` |
+| `spec.md`（冻结 v5.7） | `6969b432170928138cb787d73531a71b` | `ac820a81d9845f5288461051319e38ff` |
+| `spec_v56_frozen.md`（冻结 v5.6） | `79eabf69bb27ec30530073a166c54194` | `c4f7f8ceb91592e64d3b0e7a389e0580` |
 | `spec_v0.md` | `95c130a16e9cf506125af72f3a407548` | `01d831352d95f742ec2801e9c1996d1b` |
 | `spec_v1.md` | `d0eeeee03c9ba6a2485d99c02fae3a3d` | `be05175248153067a6e156a3d212d5b7` |
 | `spec_v2.md` | `5fb85ed34c09fb73df94725ce7948ca1` | `94976dd14639c29432d7adddf042e775` |
@@ -29,7 +30,11 @@ sha256sum results/backtest_v56_frozen_bt.log
 | `spec_v55_draft.md` | `572dcd4fd76c69aafab6ea717da3099d` | `f0051ba1c59e6e48da29f903e6427a64` |
 | `spec_v55_frozen.md`（冻结 v5.5） | `faa9b30a3f7e2fd651a7acc97cc1e023` | `c3657230641e0cd5e6fddf6ecf8593ad` |
 | `spec_v56_draft.md` | `b245963cd881d46fa259189389c9519a` | `fbf7e3a25e923219afe1fcc12d267a1f` |
-| `spec_v57_draft.md`（草案，未冻结） | `378e16ac27fee10e339c1f32c98f758a` | `91a526bbae70571c367c5518b748908a` |
+| `spec_v57_draft.md`（草案第 1 轮） | `378e16ac27fee10e339c1f32c98f758a` | `91a526bbae70571c367c5518b748908a` |
+| `spec_v57_draft_r2.md`（草案第 2 轮） | `48ce334ba633c0f89e5b30c3c4720a70` | `2578be6d2e98586a35f2380fe52365e7` |
+| `spec_v57_draft_r3.md`（草案第 3 轮） | `3919db2477d6a00b9f857cf835c003e3` | `aec0c98502f2b3a6d8ca5fe34610c987` |
+| `spec_v57_draft_r4.md`（草案第 4 轮） | `625291f006060a13ba1bad75965f9daa` | `fd43ed1b3821263bc76424e882d9e5e5` |
+| `spec_v57_draft_r5.md`（草案第 5 轮） | `03c020702125c20fde9a0d2637259033` | `73fcb170f05bc6d025ab8e88a0c08353` |
 
 注意：SPEC 文件正文内部互相引用的 md5（如 `spec.md` 第 3 行引用的 v5.5 md5）是**脱敏前的原始 md5**，与上表“原始 md5”列一致；与本仓库文件的 md5 不一致是预期的，原因就是本节记录的 1 行脱敏。
 
@@ -37,13 +42,14 @@ sha256sum results/backtest_v56_frozen_bt.log
 
 | 文件 | md5 |
 |---|---|
-| `config.py` | `e31eea9ebb9cb67f95b3f1101c067a0b` |
-| `engine.py` | `8454094e6814f2204daaa20b7afe58b1` |
-| `monitor.py` | `90a171ff2322a4c7ce1b720f8d7dcffa` |
-| `backtest.py` | `d02bca60b5600f4d3ba2e03c4effdc22` |
-| `tests/test_spec_v51.py` | `0daba938303ce4c3b914fa59a2a153ad` |
+| `config.py` | `ea293f23e4e97547242276b38dc09fab` |
+| `engine.py` | `07a627fa4edcbde78d54485aa9c91493` |
+| `monitor.py` | `8aaaf369ffde0abc54b093d34723c17a` |
+| `backtest.py` | `d8eebf9ae89c672220d2b1ad64301580` |
+| `tests/test_spec_v51.py` | `768f0e403ab4cc2f376b0e1acb514647` |
 | `tests/test_spec_v55.py` | `8d5a6f315706f6139b8a44b710561e85` |
-| `tests/test_spec_v56_holdmax.py` | `1b6722995d3f62a11ad617c1b04a6921` |
+| `tests/test_spec_v56_holdmax.py` | `8ef62519b616a204f686fe63c1161d7f` |
+| `tests/test_spec_v57.py` | `40e931a5cf0f0bc745e96530fa2d0e54` |
 
 ## 3. 数据（逐字节一致，无改动）
 
@@ -58,8 +64,9 @@ sha256sum results/backtest_v56_frozen_bt.log
 | 文件 | sha256 |
 |---|---|
 | `results/backtest_v56_frozen_bt.log` | `7322eebfc3ba18d0e8f51281a34993bdd811b70808c393006da17b0c70a88215` |
+| `results/backtest_v57_frozen_bt.log` | `b36904e0bd2c6c6e3f6229b31b9fcdd7aa4048ff6ae09cbcaa3343038da6a52c` |
 
-该日志由实现者与独立复核方各跑一次、输出逐字节一致后归档。本地复跑 `python3 backtest.py` 的输出应与之逐行一致（除日志行顺序可能因数据质量警告行的打印时机有细微差异外，全部数字一致；总盈亏容差 ±0.01 USDT）。
+v5.6 日志由实现者与独立复核方各跑一次、输出逐字节一致后归档。v5.7 日志由独立复核方跑两次、导出方本地跑一次，三次输出逐字节一致后归档；本地复跑 `python3 backtest.py` 的输出应与之逐字节一致（总盈亏容差 ±0.01 USDT）。
 
 ## 5. 评审与实现报告（逐字节一致，无改动）
 
@@ -85,6 +92,16 @@ sha256sum results/backtest_v56_frozen_bt.log
 | `results/impl_agy_v51.md` | `8ce6d72e1b8a80cb9e1f22d657308769` |
 | `results/impl_agy_v55.md` | `1c255ab67fda8e2972225bc6d91c51e2` |
 | `results/implement_v56.md` | `3b796bfb3dcabfe150b7b266b1acb410` |
+| `results/merged_review_v57.md` | `a6f0e6549e895529777ff42ddae420b9` |
+| `results/merged_review_v57r2.md` | `ebc3220cb035475231be8334b7c22bf9` |
+| `results/review_v57_agy.md` | `02d75362f5b483f531582e506493d26a` |
+| `results/review_v57_agy2.md` | `517b3a65fce7de619ccf31f2c26cf9ce` |
+| `results/review_v57r2_agy.md` | `a53ebb6897014c6550e733044b5765d0` |
+| `results/review_v57r2_agy2.md` | `b37ff8fe75223bcecc1d88a518655aab` |
+| `results/review_v57r3_recheck.md` | `8c2661822db7db107844097b53825f7a` |
+| `results/review_v57r4_recheck.md` | `2cc1e542d95b4d42340603644f398c63` |
+| `results/implement_v57.md` | `fb57d113501a232defd2792dc4a8fde7` |
+| `results/fix_audit_v57.md` | `6ddd3f68064060e0531d4f8ec561c2ca` |
 
 ## 6. 本仓库新增文件（导出时新建，非原始文件）
 

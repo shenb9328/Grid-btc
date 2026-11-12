@@ -1,11 +1,11 @@
 """
 SPEC v5.6 HOLDMAX Unit Tests (§5.3, §8.3(6)).
 Tests for:
-1. Full groups (bought_layers == 6, e.g. 1-6 OPEN or 1-5 OPEN + 6 SOLD):
+1. Full groups (bought_layers == 9, e.g. 1-9 OPEN or 1-8 OPEN + 9 SOLD):
    - Skip 7d time stop: no sell, half_time_stopped remains 0, stop_adding remains 0.
    - Skip 14d time stop: no sell, group remains OPEN.
    - Single layer TP, Group TP, and §5.1 halt execute normally.
-2. Partial groups (bought_layers < 6, e.g. 1-3 OPEN, 4-6 PENDING):
+2. Partial groups (bought_layers < 9, e.g. 1-3 OPEN, 4-9 PENDING):
    - 7d time stop executes normally: cuts >= 50%, sets half_time_stopped=1, stop_adding=1.
    - 14d time stop executes normally: liquidates remaining positions, closes group with TIME_STOP_14D.
 3. Both Monitor and Backtest implementations verified.
@@ -62,37 +62,37 @@ class TestSpecV56Holdmax(unittest.TestCase):
         conn.commit()
 
     # -------------------------------------------------------------------------
-    # 1. Full group (bought_layers == 6) skips 7d and 14d in Monitor
+    # 1. Full group (bought_layers == 9) skips 7d and 14d in Monitor
     # -------------------------------------------------------------------------
     def test_full_group_skips_7d_and_14d_monitor(self):
         conn = engine.get_db_connection(self.db_path)
         cur = conn.cursor()
         t0 = datetime(2026, 11, 1, 0, 0, tzinfo=timezone.utc)
 
-        # Scenario: ETH group 2 (1-5 OPEN, 6 SOLD) as described in prompt
+        # Scenario: ETH group 2 (1-8 OPEN, 9 SOLD)
         cur.execute("""
             INSERT INTO grid_groups (symbol, center_price, spacing_pct, atr_pct, status, opened_utc, first_buy_utc, half_time_stopped, stop_adding)
             VALUES ('ETHUSDT', 3000.0, 0.025, 0.01, 'OPEN', ?, ?, 0, 0)
         """, (t0.isoformat(), t0.isoformat()))
         gid = cur.lastrowid
 
-        # Insert layers 1 to 5 as OPEN
-        for lno in range(1, 6):
+        # Insert layers 1 to 8 as OPEN
+        for lno in range(1, 9):
             cur.execute("""
                 INSERT INTO layers (group_id, layer_no, trigger_price, buy_price, qty, notional_usdt, buy_fee_usdt, buy_slippage_usdt, status, bought_utc)
                 VALUES (?, ?, 3000.0, 3000.0, 0.05, 150.0, 0.15, 0.03, 'OPEN', ?)
             """, (gid, lno, t0.isoformat()))
-        # Insert layer 6 as SOLD
+        # Insert layer 9 as SOLD
         cur.execute("""
             INSERT INTO layers (group_id, layer_no, trigger_price, buy_price, qty, notional_usdt, buy_fee_usdt, buy_slippage_usdt, status, bought_utc, sold_utc, sell_price)
-            VALUES (?, 6, 2600.0, 2600.0, 0.20, 520.0, 0.52, 0.10, 'SOLD', ?, ?, 2650.0)
+            VALUES (?, 9, 2600.0, 2600.0, 0.20, 520.0, 0.52, 0.10, 'SOLD', ?, ?, 2650.0)
         """, (gid, t0.isoformat(), t0.isoformat()))
         self._sync_cash_invariant(conn)
         engine.assert_cash_invariant(conn)
 
-        # Verify bought_layers count from database is exactly 6
+        # Verify bought_layers count from database is exactly 9
         cur.execute("SELECT COUNT(*) as cnt FROM layers WHERE group_id = ? AND status IN ('OPEN', 'SOLD', 'TIME_STOPPED')", (gid,))
-        self.assertEqual(cur.fetchone()["cnt"], 6)
+        self.assertEqual(cur.fetchone()["cnt"], 9)
 
         m = SpotMartingaleMonitor(self.db_path)
         m.startup_checks()
@@ -150,8 +150,8 @@ class TestSpecV56Holdmax(unittest.TestCase):
         """, (t0.isoformat(), t0.isoformat()))
         gid = cur.lastrowid
 
-        # Insert 6 layers (all OPEN, bought_layers = 6)
-        for lno in range(1, 7):
+        # Insert 9 layers (all OPEN, bought_layers = 9)
+        for lno in range(1, 10):
             cur.execute("""
                 INSERT INTO layers (group_id, layer_no, trigger_price, buy_price, qty, notional_usdt, buy_fee_usdt, buy_slippage_usdt, status, bought_utc)
                 VALUES (?, ?, 50000.0, 50000.0, 0.005, 250.0, 0.25, 0.05, 'OPEN', ?)
@@ -178,19 +178,19 @@ class TestSpecV56Holdmax(unittest.TestCase):
         self.assertEqual(g_state["close_reason"], "TAKE_PROFIT")
 
         cur.execute("SELECT COUNT(*) as cnt FROM trades WHERE reason = 'GROUP_TP'")
-        self.assertEqual(cur.fetchone()["cnt"], 6, "All 6 layers sold with GROUP_TP")
+        self.assertEqual(cur.fetchone()["cnt"], 9, "All 9 layers sold with GROUP_TP")
         engine.assert_cash_invariant(conn)
         conn.close()
 
     # -------------------------------------------------------------------------
-    # 3. Partial group (bought_layers < 6) executes 7d and 14d normally in Monitor
+    # 3. Partial group (bought_layers < 9) executes 7d and 14d normally in Monitor
     # -------------------------------------------------------------------------
     def test_partial_group_executes_7d_and_14d_monitor(self):
         conn = engine.get_db_connection(self.db_path)
         cur = conn.cursor()
         t0 = datetime(2026, 11, 1, 0, 0, tzinfo=timezone.utc)
 
-        # 3 OPEN layers, 3 PENDING layers (bought_layers = 3 < 6)
+        # 3 OPEN layers, 6 PENDING layers (bought_layers = 3 < 9)
         cur.execute("""
             INSERT INTO grid_groups (symbol, center_price, spacing_pct, atr_pct, status, opened_utc, first_buy_utc, half_time_stopped, stop_adding)
             VALUES ('BTCUSDT', 50000.0, 0.02, 0.01, 'OPEN', ?, ?, 0, 0)
@@ -203,8 +203,8 @@ class TestSpecV56Holdmax(unittest.TestCase):
                 INSERT INTO layers (group_id, layer_no, trigger_price, buy_price, qty, notional_usdt, buy_fee_usdt, buy_slippage_usdt, status, bought_utc)
                 VALUES (?, ?, 50000.0, 50000.0, 0.005, 250.0, 0.25, 0.05, 'OPEN', ?)
             """, (gid, lno, t0.isoformat()))
-        # Insert 3 PENDING layers
-        for lno in range(4, 7):
+        # Insert 6 PENDING layers
+        for lno in range(4, 10):
             cur.execute("""
                 INSERT INTO layers (group_id, layer_no, trigger_price, buy_price, qty, notional_usdt, buy_fee_usdt, buy_slippage_usdt, status)
                 VALUES (?, ?, 45000.0, NULL, 0.005, 250.0, 0.0, 0.0, 'PENDING')
@@ -235,7 +235,7 @@ class TestSpecV56Holdmax(unittest.TestCase):
 
         # PENDING layers must be cancelled
         cur.execute("SELECT COUNT(*) as cnt FROM layers WHERE group_id = ? AND status = 'CANCELLED'", (gid,))
-        self.assertEqual(cur.fetchone()["cnt"], 3, "PENDING layers must be cancelled")
+        self.assertEqual(cur.fetchone()["cnt"], 6, "PENDING layers must be cancelled")
         engine.assert_cash_invariant(conn)
 
         # Now advance to 15 days (> 14 days)
@@ -259,7 +259,7 @@ class TestSpecV56Holdmax(unittest.TestCase):
     # 4. Backtest Engine Holdmax Behavior Verification
     # -------------------------------------------------------------------------
     def test_backtest_engine_holdmax_full_vs_partial(self):
-        # Case A: Full group (6/6 bought) in BacktestEngine
+        # Case A: Full group (9/9 bought) in BacktestEngine
         bt = BacktestEngine(self.events)
         start_dt = datetime(2025, 1, 1, 0, 0, tzinfo=timezone.utc)
         first_buy_dt = start_dt - timedelta(days=15) # > 14 days ago
@@ -281,11 +281,12 @@ class TestSpecV56Holdmax(unittest.TestCase):
                     'buy_price': 50000.0 * (1.0 - (lno - 1) * 0.02),
                     'qty': 0.005,
                     'notional': 250.0,
+                    'planned_notional': 250.0,
                     'buy_fee': 0.25,
                     'buy_slippage': 0.05,
                     'status': 'OPEN',
                     'bought_dt': first_buy_dt
-                } for lno in range(1, 7)
+                } for lno in range(1, 10)
             ]
         }
         bt.groups['BTCUSDT'] = grp_full
@@ -299,7 +300,7 @@ class TestSpecV56Holdmax(unittest.TestCase):
         self.assertEqual(grp_full['status'], 'OPEN')
         self.assertEqual(grp_full['half_time_stopped'], 0)
 
-        # Case B: Partial group (3/6 bought, 3 PENDING) in BacktestEngine
+        # Case B: Partial group (3/9 bought, 6 PENDING) in BacktestEngine
         grp_partial = {
             'id': 2,
             'symbol': 'BTCUSDT',
@@ -317,11 +318,12 @@ class TestSpecV56Holdmax(unittest.TestCase):
                     'buy_price': 50000.0 * (1.0 - (lno - 1) * 0.02),
                     'qty': 0.005,
                     'notional': 250.0,
+                    'planned_notional': 250.0,
                     'buy_fee': 0.25,
                     'buy_slippage': 0.05,
                     'status': 'OPEN' if lno <= 3 else 'PENDING',
                     'bought_dt': first_buy_dt if lno <= 3 else None
-                } for lno in range(1, 7)
+                } for lno in range(1, 10)
             ]
         }
         bt.groups['BTCUSDT'] = grp_partial

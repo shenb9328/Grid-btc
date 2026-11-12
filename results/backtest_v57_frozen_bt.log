@@ -1,0 +1,102 @@
+K-line gap over 3 hours for BTCUSDT: 4 consecutive missing hours ended at 2021-08-13T06:00:00+00:00
+K-line gap over 3 hours for ETHUSDT: 4 consecutive missing hours ended at 2021-08-13T06:00:00+00:00
+Loaded events.csv: version=20261108, sha256=1b039cfa90577b5b59b298b53f5d85a74cd63e03aba0cbde29e382c59b73eecc
+Loading and cleaning cached 1h klines...
+Loaded BTC: 51629 valid bars (unmappable=0, dups=0, all_invalid=0)
+Loaded ETH: 51629 valid bars (unmappable=0, dups=0, all_invalid=0)
+
+================================================================================
+PARTITION: Training Set (2021-01-01 to 2024-12-31 UTC)
+Total Hours in Grid: 35064
+  BTCUSDT:
+    Price Error Rounds: 14 (missing_bar=14, invalid_ohlc=0) [Check: 14+0==14]
+    Gaps > 3 hours Count: 1
+    Suspect Price Rounds: 1
+    Condition (a) Accepted Rounds: 1
+    Condition (b) Evaluated Rounds: 1, Accepted Rounds: 0
+  ETHUSDT:
+    Price Error Rounds: 14 (missing_bar=14, invalid_ohlc=0) [Check: 14+0==14]
+    Gaps > 3 hours Count: 1
+    Suspect Price Rounds: 1
+    Condition (a) Accepted Rounds: 0
+    Condition (b) Evaluated Rounds: 1, Accepted Rounds: 0
+  Performance Metrics:
+    Total PnL: -694.49 USDT (End Equity: 9305.51 USDT)
+    Max Drawdown: 15.44% (close sample: 15.44%, post-halt: 15.44%)
+    Profit Factor: 0.84
+    Win Month Ratio: 60.42% (29/48)
+    Total Trades: 3723 (Sell trades: 1860)
+================================================================================
+
+================================================================================
+PARTITION: Test Set (2025-01-01 to 2026-10-31 UTC)
+Total Hours in Grid: 16056
+  BTCUSDT:
+    Price Error Rounds: 0 (missing_bar=0, invalid_ohlc=0) [Check: 0+0==0]
+    Gaps > 3 hours Count: 0
+    Suspect Price Rounds: 0
+    Condition (a) Accepted Rounds: 0
+    Condition (b) Evaluated Rounds: 0, Accepted Rounds: 0
+  ETHUSDT:
+    Price Error Rounds: 0 (missing_bar=0, invalid_ohlc=0) [Check: 0+0==0]
+    Gaps > 3 hours Count: 0
+    Suspect Price Rounds: 1
+    Condition (a) Accepted Rounds: 1
+    Condition (b) Evaluated Rounds: 1, Accepted Rounds: 0
+  Performance Metrics:
+    Total PnL: -471.96 USDT (End Equity: 9528.04 USDT)
+    Max Drawdown: 11.82% (close sample: 11.82%, post-halt: 0.00%)
+    Profit Factor: 1.1
+    Win Month Ratio: 63.64% (14/22)
+    Total Trades: 976 (Sell trades: 481)
+================================================================================
+
+Stress Tests 1-3 Fixed Spacings: BTC d=0.0200 (BTC_SPACING_COEFF=2.0), ETH d=0.0250 (ETH_SPACING_COEFF=2.5)
+
+--- Running Stress Test 1 (+50%) ---
+ST1 Results: {'total_pnl': 3577.96, 'max_drawdown_pct': 0.0, 'close_sample_max_dd_pct': 0.0, 'post_halt_max_dd_pct': 0.0, 'max_drawdown_raw': 0.0, 'profit_factor': 0.0, 'win_month_ratio_pct': 0.0, 'win_month_ratio_raw': 0.0, 'total_trades': 0, 'sell_trades': 0, 'active_months': 0, 'win_months': 0, 'end_equity': 13577.96, 'stats': {'BTCUSDT': {'price_error_rounds': 0, 'missing_bar_rounds': 0, 'invalid_ohlc_rounds': 0, 'suspect_price_rounds': 0, 'accepted_a_rounds': 0, 'evaluated_b_rounds': 0, 'accepted_b_rounds': 0, 'gaps_over_3_hours': 0}, 'ETHUSDT': {'price_error_rounds': 0, 'missing_bar_rounds': 0, 'invalid_ohlc_rounds': 0, 'suspect_price_rounds': 0, 'accepted_a_rounds': 0, 'evaluated_b_rounds': 0, 'accepted_b_rounds': 0, 'gaps_over_3_hours': 0}}}
+
+--- Running Stress Test 2 (-50%) ---
+ST2 Dual Results: {'total_pnl': -1504.42, 'max_drawdown_pct': 15.04, 'close_sample_max_dd_pct': 15.04, 'post_halt_max_dd_pct': 15.04, 'max_drawdown_raw': 0.15044248999999998, 'profit_factor': 0.0, 'win_month_ratio_pct': 0.0, 'win_month_ratio_raw': 0.0, 'total_trades': 18, 'sell_trades': 18, 'active_months': 1, 'win_months': 0, 'end_equity': 8495.58, 'stats': {'BTCUSDT': {'price_error_rounds': 0, 'missing_bar_rounds': 0, 'invalid_ohlc_rounds': 0, 'suspect_price_rounds': 0, 'accepted_a_rounds': 0, 'evaluated_b_rounds': 0, 'accepted_b_rounds': 0, 'gaps_over_3_hours': 0}, 'ETHUSDT': {'price_error_rounds': 0, 'missing_bar_rounds': 0, 'invalid_ohlc_rounds': 0, 'suspect_price_rounds': 0, 'accepted_a_rounds': 0, 'evaluated_b_rounds': 0, 'accepted_b_rounds': 0, 'gaps_over_3_hours': 0}}} Halt hour: 509, recovery verified: True
+ST2 BTC alone Results: {'total_pnl': -1310.02, 'max_drawdown_pct': 13.1, 'close_sample_max_dd_pct': 13.1, 'post_halt_max_dd_pct': 0.0, 'max_drawdown_raw': 0.13100241895880207, 'profit_factor': 0.0, 'win_month_ratio_pct': 0.0, 'win_month_ratio_raw': 0.0, 'total_trades': 0, 'sell_trades': 0, 'active_months': 0, 'win_months': 0, 'end_equity': 8689.98, 'stats': {'BTCUSDT': {'price_error_rounds': 0, 'missing_bar_rounds': 0, 'invalid_ohlc_rounds': 0, 'suspect_price_rounds': 0, 'accepted_a_rounds': 0, 'evaluated_b_rounds': 0, 'accepted_b_rounds': 0, 'gaps_over_3_hours': 0}, 'ETHUSDT': {'price_error_rounds': 0, 'missing_bar_rounds': 0, 'invalid_ohlc_rounds': 0, 'suspect_price_rounds': 0, 'accepted_a_rounds': 0, 'evaluated_b_rounds': 0, 'accepted_b_rounds': 0, 'gaps_over_3_hours': 0}}}
+ST2 ETH alone Results: {'total_pnl': -834.66, 'max_drawdown_pct': 8.35, 'close_sample_max_dd_pct': 8.35, 'post_halt_max_dd_pct': 0.0, 'max_drawdown_raw': 0.083465587134192, 'profit_factor': 0.0, 'win_month_ratio_pct': 0.0, 'win_month_ratio_raw': 0.0, 'total_trades': 0, 'sell_trades': 0, 'active_months': 0, 'win_months': 0, 'end_equity': 9165.34, 'stats': {'BTCUSDT': {'price_error_rounds': 0, 'missing_bar_rounds': 0, 'invalid_ohlc_rounds': 0, 'suspect_price_rounds': 0, 'accepted_a_rounds': 0, 'evaluated_b_rounds': 0, 'accepted_b_rounds': 0, 'gaps_over_3_hours': 0}, 'ETHUSDT': {'price_error_rounds': 0, 'missing_bar_rounds': 0, 'invalid_ohlc_rounds': 0, 'suspect_price_rounds': 0, 'accepted_a_rounds': 0, 'evaluated_b_rounds': 0, 'accepted_b_rounds': 0, 'gaps_over_3_hours': 0}}}
+
+--- Running Stress Test 3 (Down 30% Up 20%) ---
+ST3 Results: {'total_pnl': -198.98, 'max_drawdown_pct': 10.0, 'close_sample_max_dd_pct': 10.0, 'post_halt_max_dd_pct': 0.0, 'max_drawdown_raw': 0.10001520853020539, 'profit_factor': 0.0, 'win_month_ratio_pct': 0.0, 'win_month_ratio_raw': 0.0, 'total_trades': 0, 'sell_trades': 0, 'active_months': 0, 'win_months': 0, 'end_equity': 9801.02, 'stats': {'BTCUSDT': {'price_error_rounds': 0, 'missing_bar_rounds': 0, 'invalid_ohlc_rounds': 0, 'suspect_price_rounds': 0, 'accepted_a_rounds': 0, 'evaluated_b_rounds': 0, 'accepted_b_rounds': 0, 'gaps_over_3_hours': 0}, 'ETHUSDT': {'price_error_rounds': 0, 'missing_bar_rounds': 0, 'invalid_ohlc_rounds': 0, 'suspect_price_rounds': 0, 'accepted_a_rounds': 0, 'evaluated_b_rounds': 0, 'accepted_b_rounds': 0, 'gaps_over_3_hours': 0}}}
+
+--- Running Stress Test 4 (Real Slice 2022-06-01 to 2022-06-30 UTC) ---
+
+================================================================================
+PARTITION: Stress Test 4 (Real Slice 2022-06 UTC)
+Total Hours in Grid: 720
+  BTCUSDT:
+    Price Error Rounds: 0 (missing_bar=0, invalid_ohlc=0) [Check: 0+0==0]
+    Gaps > 3 hours Count: 0
+    Suspect Price Rounds: 0
+    Condition (a) Accepted Rounds: 0
+    Condition (b) Evaluated Rounds: 0, Accepted Rounds: 0
+  ETHUSDT:
+    Price Error Rounds: 0 (missing_bar=0, invalid_ohlc=0) [Check: 0+0==0]
+    Gaps > 3 hours Count: 0
+    Suspect Price Rounds: 0
+    Condition (a) Accepted Rounds: 0
+    Condition (b) Evaluated Rounds: 0, Accepted Rounds: 0
+  Performance Metrics:
+    Total PnL: -144.33 USDT (End Equity: 9855.67 USDT)
+    Max Drawdown: 2.62% (close sample: 2.62%, post-halt: 0.00%)
+    Profit Factor: 0.39
+    Win Month Ratio: 0.00% (0/1)
+    Total Trades: 89 (Sell trades: 41)
+================================================================================
+
+================================================================================
+SPEC §8.3 ACCEPTANCE CRITERIA EVALUATION
+================================================================================
+1. Test Set Total PnL > 0: FAIL (total_pnl = -471.96 USDT)
+2. Test Set Max Drawdown <= 16.00%: PASS (close_sample=11.82%, post_halt=0.00%)
+3. Profit Factor >= 1.20: FAIL (profit_factor = 1.1)
+4. Win Month Ratio >= 60%: PASS (win_month_ratio = 63.64%, 14/22)
+5. Stress Test 2 Halt & Recovery: PASS (Dual: halt_hour=509, dd=15.04%, recovery=True; BTC alone dd=13.1%; ETH alone dd=8.35%)
+6. Unit Tests: (Run via 'python3 -m unittest discover tests' to verify all 13+ tests pass)
+7. Reproducibility: (Run twice with identical config & data; verify metrics match exactly)
+================================================================================
