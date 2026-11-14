@@ -106,56 +106,61 @@ class TestSpecV57Requirements(unittest.TestCase):
     # 2. Dynamic multiplier ladder & planned notional recursion
     # -------------------------------------------------------------
     def test_dynamic_multiplier_ladder_and_recursion(self):
-        # Multiplier ladder returns (multiplier, is_permitted):
-        # DD < 2%: 1.2
-        self.assertEqual(engine.get_dynamic_multiplier(0.00, "RANGING"), (1.2, True))
-        self.assertEqual(engine.get_dynamic_multiplier(0.0199, "STRONG_DOWN"), (1.2, True))
+        # Explicit mock of v5.7 old ladder arithmetic (1.2, 1.3, 1.4, 1.5)
+        with patch.object(config, "MULT_DD_LT_2", 1.2), \
+             patch.object(config, "MULT_DD_2_5", 1.3), \
+             patch.object(config, "MULT_DD_5_10", 1.4), \
+             patch.object(config, "MULT_DD_10_20", 1.5):
+            # Multiplier ladder returns (multiplier, is_permitted):
+            # DD < 2%: 1.2
+            self.assertEqual(engine.get_dynamic_multiplier(0.00, "RANGING"), (1.2, True))
+            self.assertEqual(engine.get_dynamic_multiplier(0.0199, "STRONG_DOWN"), (1.2, True))
 
-        # 2% <= DD < 5%: 1.3
-        self.assertEqual(engine.get_dynamic_multiplier(0.02, "RANGING"), (1.3, True))
-        self.assertEqual(engine.get_dynamic_multiplier(0.0499, "SLOW_DOWN"), (1.3, True))
+            # 2% <= DD < 5%: 1.3
+            self.assertEqual(engine.get_dynamic_multiplier(0.02, "RANGING"), (1.3, True))
+            self.assertEqual(engine.get_dynamic_multiplier(0.0499, "SLOW_DOWN"), (1.3, True))
 
-        # 5% <= DD < 10%: 1.4
-        self.assertEqual(engine.get_dynamic_multiplier(0.05, "RANGING"), (1.4, True))
-        self.assertEqual(engine.get_dynamic_multiplier(0.0999, "STRONG_DOWN"), (1.4, True))
+            # 5% <= DD < 10%: 1.4
+            self.assertEqual(engine.get_dynamic_multiplier(0.05, "RANGING"), (1.4, True))
+            self.assertEqual(engine.get_dynamic_multiplier(0.0999, "STRONG_DOWN"), (1.4, True))
 
-        # 10% <= DD <= 20%:
-        # Non-STRONG_DOWN: 1.5, True
-        self.assertEqual(engine.get_dynamic_multiplier(0.10, "RANGING"), (1.5, True))
-        self.assertEqual(engine.get_dynamic_multiplier(0.15, "SLOW_DOWN"), (1.5, True))
-        self.assertEqual(engine.get_dynamic_multiplier(0.20, "REBOUND"), (1.5, True))
-        # STRONG_DOWN: 1.5, False (blocked)
-        self.assertEqual(engine.get_dynamic_multiplier(0.10, "STRONG_DOWN"), (1.5, False))
-        self.assertEqual(engine.get_dynamic_multiplier(0.15, "STRONG_DOWN"), (1.5, False))
-        self.assertEqual(engine.get_dynamic_multiplier(0.20, "STRONG_DOWN"), (1.5, False))
+            # 10% <= DD <= 20%:
+            # Non-STRONG_DOWN: 1.5, True
+            self.assertEqual(engine.get_dynamic_multiplier(0.10, "RANGING"), (1.5, True))
+            self.assertEqual(engine.get_dynamic_multiplier(0.15, "SLOW_DOWN"), (1.5, True))
+            self.assertEqual(engine.get_dynamic_multiplier(0.20, "REBOUND"), (1.5, True))
+            # STRONG_DOWN: 1.5, False (blocked)
+            self.assertEqual(engine.get_dynamic_multiplier(0.10, "STRONG_DOWN"), (1.5, False))
+            self.assertEqual(engine.get_dynamic_multiplier(0.15, "STRONG_DOWN"), (1.5, False))
+            self.assertEqual(engine.get_dynamic_multiplier(0.20, "STRONG_DOWN"), (1.5, False))
 
-        # DD > 20%: None, False (stop adding permanently)
-        self.assertEqual(engine.get_dynamic_multiplier(0.2001, "RANGING"), (None, False))
-        self.assertEqual(engine.get_dynamic_multiplier(0.25, "RANGING"), (None, False))
+            # DD > 20%: None, False (stop adding permanently)
+            self.assertEqual(engine.get_dynamic_multiplier(0.2001, "RANGING"), (None, False))
+            self.assertEqual(engine.get_dynamic_multiplier(0.25, "RANGING"), (None, False))
 
-        # Recursion verification:
-        # L1 seed for BTC = 93.71
-        seed = config.BTC_LAYER_NOTIONALS[0]
-        self.assertEqual(seed, 93.71)
+            # Recursion verification:
+            # L1 seed for BTC = 93.71
+            seed = config.BTC_LAYER_NOTIONALS[0]
+            self.assertEqual(seed, 93.71)
 
-        # Assume DD = 1.5% -> mult = 1.2
-        # L2 planned = 93.71 * 1.2 = 112.452
-        l2_plan = seed * 1.2
-        self.assertAlmostEqual(l2_plan, 112.452, places=3)
+            # Assume DD = 1.5% -> mult = 1.2
+            # L2 planned = 93.71 * 1.2 = 112.452
+            l2_plan = seed * 1.2
+            self.assertAlmostEqual(l2_plan, 112.452, places=3)
 
-        # Suppose L2 executes at BTC price 50000.0
-        qty2, actual2 = engine.compute_order_qty("BTCUSDT", l2_plan, 50000.0)
-        # Step size is 0.001 -> qty2 = round_down(112.452 / 50000.0, 3) = 0.002 BTC
-        # actual2 = 0.002 * 50000.0 = 100.0 USDT
-        self.assertEqual(qty2, 0.002)
-        self.assertEqual(actual2, 100.0)
+            # Suppose L2 executes at BTC price 50000.0
+            qty2, actual2 = engine.compute_order_qty("BTCUSDT", l2_plan, 50000.0)
+            # Step size is 0.001 -> qty2 = round_down(112.452 / 50000.0, 3) = 0.002 BTC
+            # actual2 = 0.002 * 50000.0 = 100.0 USDT
+            self.assertEqual(qty2, 0.002)
+            self.assertEqual(actual2, 100.0)
 
-        # Now compute L3 planned notional: MUST use l2_plan (112.452), NOT actual2 (100.0)!
-        # If DD = 3% -> mult = 1.3
-        l3_plan = l2_plan * 1.3
-        self.assertAlmostEqual(l3_plan, 146.1876, places=4)
-        # Verify that l3_plan is distinct from actual2 * 1.3 (130.0)
-        self.assertNotEqual(round(l3_plan, 2), round(actual2 * 1.3, 2))
+            # Now compute L3 planned notional: MUST use l2_plan (112.452), NOT actual2 (100.0)!
+            # If DD = 3% -> mult = 1.3
+            l3_plan = l2_plan * 1.3
+            self.assertAlmostEqual(l3_plan, 146.1876, places=4)
+            # Verify that l3_plan is distinct from actual2 * 1.3 (130.0)
+            self.assertNotEqual(round(l3_plan, 2), round(actual2 * 1.3, 2))
 
     # -------------------------------------------------------------
     # 3. SLOW_DOWN cooldown boundary (now_utc - max(bought_utc) == 86400s)
@@ -333,28 +338,14 @@ class TestSpecV57Requirements(unittest.TestCase):
                 VALUES (?, ?, 49000.0, 49000.0, 0.003, 147.0, 0.147, 0.0294, 'SOLD', ?, ?, 49500.0)
             """, (gid, lno, t0.isoformat(), t0.isoformat()))
 
-        # Also insert a v5.7 group (9 layers) to ensure it is NOT closed
-        cur.execute("""
-            INSERT INTO grid_groups (symbol, center_price, spacing_pct, atr_pct, status, opened_utc, first_buy_utc, stop_adding)
-            VALUES ('ETHUSDT', 3000.0, 0.015, 0.01, 'OPEN', ?, ?, 0)
-        """, (t0.isoformat(), t0.isoformat()))
-        gid_v57 = cur.lastrowid
-        cur.execute("""
-            INSERT INTO layers (group_id, layer_no, trigger_price, buy_price, qty, notional_usdt, buy_fee_usdt, buy_slippage_usdt, status, bought_utc, planned_notional_usdt)
-            VALUES (?, 1, 3000.0, 3000.0, 0.02, 60.0, 0.06, 0.012, 'OPEN', ?, 62.47)
-        """, (gid_v57, t0.isoformat()))
-        for lno in range(2, 10):
-            cur.execute("INSERT INTO layers (group_id, layer_no, trigger_price, status) VALUES (?, ?, 2800.0, 'PENDING')", (gid_v57, lno))
-
         # Set symbol last_valid_price
         cur.execute("UPDATE symbol_state SET last_valid_price = 50200.0 WHERE symbol = 'BTCUSDT'")
-        cur.execute("UPDATE symbol_state SET last_valid_price = 3000.0 WHERE symbol = 'ETHUSDT'")
         self._sync_cash_invariant(conn)
         engine.assert_cash_invariant(conn)
         conn.close()
 
         monitor = SpotMartingaleMonitor(self.db_path)
-        # Execute transition close first time
+        # Execute transition close first time (account.v58_transition_done == 0)
         monitor.execute_transition_close()
 
         conn = engine.get_db_connection(self.db_path)
@@ -369,14 +360,38 @@ class TestSpecV57Requirements(unittest.TestCase):
         cur.execute("SELECT COUNT(*) as cnt FROM trades WHERE group_id = ? AND reason = 'TRANSITION_CLOSE'", (gid,))
         self.assertEqual(cur.fetchone()["cnt"], 2)
 
-        # Verify v5.7 group is STILL OPEN (untouched)
-        cur.execute("SELECT status FROM grid_groups WHERE id = ?", (gid_v57,))
+        # Verify v58_transition_done is set to 1
+        cur.execute("SELECT v58_transition_done FROM account WHERE id = 1")
+        self.assertEqual(cur.fetchone()["v58_transition_done"], 1)
+
+        # Now insert a newly opened group (post-transition v5.8 group)
+        t1 = datetime(2026, 11, 12, 10, 0, tzinfo=timezone.utc)
+        cur.execute("""
+            INSERT INTO grid_groups (symbol, center_price, spacing_pct, atr_pct, status, opened_utc, first_buy_utc, stop_adding)
+            VALUES ('ETHUSDT', 3000.0, 0.015, 0.01, 'OPEN', ?, ?, 0)
+        """, (t1.isoformat(), t1.isoformat()))
+        gid_new = cur.lastrowid
+        cur.execute("""
+            INSERT INTO layers (group_id, layer_no, trigger_price, buy_price, qty, notional_usdt, buy_fee_usdt, buy_slippage_usdt, status, bought_utc, planned_notional_usdt)
+            VALUES (?, 1, 3000.0, 3000.0, 0.02, 60.0, 0.06, 0.012, 'OPEN', ?, 62.47)
+        """, (gid_new, t1.isoformat()))
+        for lno in range(2, 10):
+            cur.execute("INSERT INTO layers (group_id, layer_no, trigger_price, status) VALUES (?, ?, 2800.0, 'PENDING')", (gid_new, lno))
+
+        cur.execute("UPDATE symbol_state SET last_valid_price = 3000.0 WHERE symbol = 'ETHUSDT'")
+        self._sync_cash_invariant(conn)
+        engine.assert_cash_invariant(conn)
+        conn.close()
+
+        # Execute transition close a second time: MUST BE IDEMPOTENT (v58_transition_done==1, new group untouched)
+        monitor.execute_transition_close()
+
+        conn = engine.get_db_connection(self.db_path)
+        cur = conn.cursor()
+        # Verify post-transition group is STILL OPEN (untouched)
+        cur.execute("SELECT status FROM grid_groups WHERE id = ?", (gid_new,))
         self.assertEqual(cur.fetchone()["status"], "OPEN")
 
-        engine.assert_cash_invariant(conn)
-
-        # Execute transition close a second time: MUST BE IDEMPOTENT (no new trades, no errors)
-        monitor.execute_transition_close()
         cur.execute("SELECT COUNT(*) as cnt FROM trades WHERE group_id = ? AND reason = 'TRANSITION_CLOSE'", (gid,))
         self.assertEqual(cur.fetchone()["cnt"], 2, "Second run must not create duplicate trades")
         engine.assert_cash_invariant(conn)
@@ -420,42 +435,29 @@ class TestSpecV57Requirements(unittest.TestCase):
                 VALUES (?, ?, 49000.0, 49000.0, 0.003, 147.0, 0.147, 0.0294, 'SOLD', ?, ?, 49500.0)
             """, (gid_legacy, lno, t0.isoformat(), t0.isoformat()))
 
-        # 2. v5.7 OPEN group (9 layers)
-        cur.execute("""
-            INSERT INTO grid_groups (symbol, center_price, spacing_pct, atr_pct, status, opened_utc, first_buy_utc, stop_adding)
-            VALUES ('ETHUSDT', 3000.0, 0.015, 0.01, 'OPEN', ?, ?, 0)
-        """, (t0.isoformat(), t0.isoformat()))
-        gid_v57 = cur.lastrowid
-        cur.execute("""
-            INSERT INTO layers (group_id, layer_no, trigger_price, buy_price, qty, notional_usdt, buy_fee_usdt, buy_slippage_usdt, status, bought_utc, planned_notional_usdt)
-            VALUES (?, 1, 3000.0, 3000.0, 0.02, 60.0, 0.06, 0.012, 'OPEN', ?, 62.47)
-        """, (gid_v57, t0.isoformat()))
-        for lno in range(2, 10):
-            cur.execute("INSERT INTO layers (group_id, layer_no, trigger_price, status) VALUES (?, ?, 2800.0, 'PENDING')", (gid_v57, lno))
-
         # Set symbol state
         cur.execute("UPDATE symbol_state SET last_valid_price = 50200.0 WHERE symbol = 'BTCUSDT'")
-        cur.execute("UPDATE symbol_state SET last_valid_price = 3000.0 WHERE symbol = 'ETHUSDT'")
         self._sync_cash_invariant(conn)
         engine.assert_cash_invariant(conn)
         conn.close()
 
         mock_now = datetime.now(timezone.utc)
-        dummy_kline = [0, 50000.0, 50500.0, 49500.0, 50000.0, 10.0, int(mock_now.timestamp() * 1000) - 1000, 0, 0, 0, 0, 0]
+        # Position = (45000 - 40000) / (60000 - 40000) = 0.25 <= 0.35 (satisfies pos_ok)
+        dummy_kline = [0, 45000.0, 60000.0, 40000.0, 45000.0, 10.0, int(mock_now.timestamp() * 1000) - 1000, 0, 0, 0, 0, 0]
         klines_500 = [dummy_kline for _ in range(500)]
 
         with patch.object(config, "DB_PATH", self.db_path):
             with patch("monitor.BinancePublicClient") as mock_client_cls:
                 mock_client = mock_client_cls.return_value
                 mock_client.get_server_time.return_value = (mock_now, None)
-                mock_client.get_ticker_price.side_effect = lambda sym: (50200.0 if sym == "BTCUSDT" else 3000.0, None)
+                mock_client.get_ticker_price.side_effect = lambda sym: (45000.0 if sym == "BTCUSDT" else 3000.0, None)
                 mock_client.get_recent_closed_klines.side_effect = lambda sym, limit=500: (klines_500, None)
 
-                # Execute real main() entry point with --once
+                # Execute real main() entry point with --once (First start: transition close + open new group)
                 import monitor as monitor_mod
                 monitor_mod.main(["--once"])
 
-        # Verify results in DB
+        # Verify results in DB after first start
         conn = engine.get_db_connection(self.db_path)
         cur = conn.cursor()
 
@@ -469,8 +471,32 @@ class TestSpecV57Requirements(unittest.TestCase):
         cur.execute("SELECT COUNT(*) as cnt FROM trades WHERE group_id = ? AND reason = 'TRANSITION_CLOSE'", (gid_legacy,))
         self.assertEqual(cur.fetchone()["cnt"], 2)
 
-        # v5.7 group is STILL OPEN
-        cur.execute("SELECT status FROM grid_groups WHERE id = ?", (gid_v57,))
+        # v58_transition_done is set to 1
+        cur.execute("SELECT v58_transition_done FROM account WHERE id = 1")
+        self.assertEqual(cur.fetchone()["v58_transition_done"], 1)
+
+        # A new group was opened during the first run
+        cur.execute("SELECT id, status FROM grid_groups WHERE id != ? AND status = 'OPEN'", (gid_legacy,))
+        new_grp = cur.fetchone()
+        self.assertIsNotNone(new_grp, "New group should be opened in first run")
+        gid_new = new_grp["id"]
+        self.assertEqual(new_grp["status"], "OPEN")
+        conn.close()
+
+        # Second start: main(["--once"]) must NOT close the newly opened group (v58_transition_done == 1)
+        with patch.object(config, "DB_PATH", self.db_path):
+            with patch("monitor.BinancePublicClient") as mock_client_cls:
+                mock_client = mock_client_cls.return_value
+                mock_client.get_server_time.return_value = (mock_now, None)
+                mock_client.get_ticker_price.side_effect = lambda sym: (45000.0 if sym == "BTCUSDT" else 3000.0, None)
+                mock_client.get_recent_closed_klines.side_effect = lambda sym, limit=500: (klines_500, None)
+
+                monitor_mod.main(["--once"])
+
+        conn = engine.get_db_connection(self.db_path)
+        cur = conn.cursor()
+        # Verify new group is STILL OPEN after second startup
+        cur.execute("SELECT status FROM grid_groups WHERE id = ?", (gid_new,))
         self.assertEqual(cur.fetchone()["status"], "OPEN")
 
         # Cash accounting invariant is satisfied

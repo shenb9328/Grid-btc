@@ -1,5 +1,5 @@
 """
-Offline Backtest and Stress Testing Module (SPEC v5.7).
+Offline Backtest and Stress Testing Module (SPEC v5.8).
 Implements close-only 1h matching, training/test set partition, and 4 stress test suites.
 No external network calls; uses local CSV data.
 """
@@ -799,8 +799,9 @@ class BacktestEngine:
         cond1 = (adx is not None and adx < config.ADX_THRESHOLD)
         cond2 = (hh is not None and ll is not None and prev_c is not None and ll < prev_c < hh)
         cond3 = (atr is not None and atr_med is not None and atr < config.ATR_MEDIAN_MULTIPLIER * atr_med)
+        cond4 = bool(inds.get("pos_ok", False))
 
-        if not (cond1 and cond2 and cond3):
+        if not (cond1 and cond2 and cond3 and cond4):
             return
 
         planned_l1 = config.BTC_LAYER_NOTIONALS[0] if symbol == "BTCUSDT" else config.ETH_LAYER_NOTIONALS[0]
@@ -1024,7 +1025,9 @@ def precompute_series_indicators(bars: List[Dict[str, Any]]) -> List[Dict[str, A
                 'll_480': None,
                 'atr_median_480': None,
                 'prev_close': closes[i],
-                'valid_bars_count': i + 1
+                'valid_bars_count': i + 1,
+                'position': None,
+                'pos_ok': False
             }
             continue
 
@@ -1038,6 +1041,13 @@ def precompute_series_indicators(bars: List[Dict[str, Any]]) -> List[Dict[str, A
         mid = len(sorted_atrs) // 2
         atr_med = (sorted_atrs[mid - 1] + sorted_atrs[mid]) / 2.0
 
+        if hh <= ll:
+            pos = None
+            pos_ok = False
+        else:
+            pos = (closes[i] - ll) / (hh - ll)
+            pos_ok = (pos <= config.POSITION_THRESHOLD)
+
         res[i] = {
             'adx': adx_arr[i],
             'plus_di': plus_di_arr[i],
@@ -1049,7 +1059,9 @@ def precompute_series_indicators(bars: List[Dict[str, Any]]) -> List[Dict[str, A
             'll_480': ll,
             'atr_median_480': atr_med,
             'prev_close': closes[i],
-            'valid_bars_count': i + 1
+            'valid_bars_count': i + 1,
+            'position': pos,
+            'pos_ok': pos_ok
         }
     return res
 

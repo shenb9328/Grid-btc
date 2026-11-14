@@ -1,5 +1,5 @@
 """
-Engine module for Spot Martingale (SPEC v5.7).
+Engine module for Spot Martingale (SPEC v5.8).
 Contains database schema, models, technical indicators, accounting invariants,
 suspicious price state machine, and risk management logic.
 """
@@ -44,7 +44,8 @@ CREATE TABLE IF NOT EXISTS account (
     last_poll_utc TEXT,
     last_poll_monotonic_s REAL,
     realized_pnl_usdt REAL NOT NULL DEFAULT 0.0,
-    updated_utc TEXT NOT NULL
+    updated_utc TEXT NOT NULL,
+    v58_transition_done INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS symbol_state (
@@ -168,6 +169,12 @@ def init_db(db_path=config.DB_PATH):
             if col not in regime_cols:
                 cur.execute(f"ALTER TABLE regime_log ADD COLUMN {col} {col_type}")
 
+        # 3. account.v58_transition_done (§6.1, v5.8)
+        cur.execute("PRAGMA table_info(account)")
+        account_cols = [r["name"] for r in cur.fetchall()]
+        if "v58_transition_done" not in account_cols:
+            cur.execute("ALTER TABLE account ADD COLUMN v58_transition_done INTEGER NOT NULL DEFAULT 0")
+
         now_str = datetime.now(timezone.utc).isoformat()
         cur.execute("SELECT id FROM account WHERE id = 1")
         if not cur.fetchone():
@@ -176,8 +183,9 @@ def init_db(db_path=config.DB_PATH):
                     id, cash_usdt, initial_usdt, peak_equity_usdt,
                     day_start_equity_usdt, halt_active, halt_state,
                     halt_progress_sold_layers, halt_progress_total_layers,
-                    halt_zero_progress_rounds, realized_pnl_usdt, updated_utc
-                ) VALUES (1, 10000.0, 10000.0, 10000.0, 10000.0, 0, 'NONE', 0, 0, 0, 0.0, ?)
+                    halt_zero_progress_rounds, realized_pnl_usdt, updated_utc,
+                    v58_transition_done
+                ) VALUES (1, 10000.0, 10000.0, 10000.0, 10000.0, 0, 'NONE', 0, 0, 0, 0.0, ?, 0)
             """, (now_str,))
         
         for sym in ["BTCUSDT", "ETHUSDT"]:
@@ -232,6 +240,8 @@ def calculate_indicators(klines_1h: List[List[Any]]) -> Dict[str, Any]:
             'atr_median_480': None,
             'prev_close': float(klines_1h[-1][4]) if n > 0 else None,
             'in_range': False,
+            'position': None,
+            'pos_ok': False,
             'error': f'Insufficient bars: {n} < {config.MIN_KLINES_BARS}'
         }
 
@@ -331,6 +341,14 @@ def calculate_indicators(klines_1h: List[List[Any]]) -> Dict[str, Any]:
 
     in_range = (ll_480 < current_close < hh_480)
 
+    # Position & pos_ok (§3.4, §4.1 Condition 7, SPEC v5.8)
+    if hh_480 <= ll_480:
+        position = None
+        pos_ok = False
+    else:
+        position = (current_close - ll_480) / (hh_480 - ll_480)
+        pos_ok = (position <= config.POSITION_THRESHOLD)
+
     return {
         'adx': current_adx,
         'plus_di': plus_di_arr[-1] if n >= 28 else None,
@@ -342,7 +360,9 @@ def calculate_indicators(klines_1h: List[List[Any]]) -> Dict[str, Any]:
         'll_480': ll_480,
         'atr_median_480': atr_median_480,
         'prev_close': current_close,
-        'in_range': in_range
+        'in_range': in_range,
+        'position': position,
+        'pos_ok': pos_ok
     }
 
 # ---------------------------------------------------------
@@ -499,10 +519,10 @@ def classify_regime(
 def get_dynamic_multiplier(dd: float, regime: Optional[str] = None) -> Tuple[Optional[float], bool]:
     """
     Determine dynamic multiplier and check whether adding is permitted (§2, §3.2, §7.1):
-    - DD < 2%: 1.2
-    - 2% <= DD < 5%: 1.3
-    - 5% <= DD < 10%: 1.4
-    - 10% <= DD <= 20%: 1.5 (permitted only when regime != STRONG_DOWN)
+    - DD < 2%: 1.0 (v5.8)
+    - 2% <= DD < 5%: 1.0 (v5.8)
+    - 5% <= DD < 10%: 1.0 (v5.8)
+    - 10% <= DD <= 20%: 1.0 (permitted only when regime != STRONG_DOWN)
     - DD > 20%: None, stop adding
     Returns (multiplier, is_permitted).
     """

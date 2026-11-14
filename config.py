@@ -1,6 +1,6 @@
 """
 Configuration for Spot Martingale (Binance Spot · DRY_RUN simulation)
-Frozen under SPEC v5.7 (2026-11-12).
+Frozen under SPEC v5.8 (2026-11-12).
 Strict equality check with frozen value table on startup; mismatch causes sys.exit(1).
 """
 
@@ -33,10 +33,10 @@ MULTIPLIER = 1.3
 S = 32.01499791
 
 # Dynamic Multiplier Ladders (§2, §3.2, §7.1)
-MULT_DD_LT_2 = 1.2
-MULT_DD_2_5 = 1.3
-MULT_DD_5_10 = 1.4
-MULT_DD_10_20 = 1.5
+MULT_DD_LT_2 = 1.0
+MULT_DD_2_5 = 1.0
+MULT_DD_5_10 = 1.0
+MULT_DD_10_20 = 1.0
 
 # Authoritative layer notionals (§2, half-up rounding, 9th layer residual)
 BTC_LAYER_NOTIONALS = [93.71, 121.82, 158.36, 205.87, 267.63, 347.92, 452.30, 587.99, 764.40]
@@ -54,7 +54,8 @@ ETH_SPACING_MAX = 0.040
 GROUP_TP_PCT = 0.015  # +1.5%
 
 # 4. Market Regime & Indicators (§3.4, §4.1, §4.3)
-ADX_THRESHOLD = 25.0  # < 25
+ADX_THRESHOLD = 30.0  # < 30
+POSITION_THRESHOLD = 0.35  # <= 0.35
 ATR_MEDIAN_MULTIPLIER = 2.0  # < 2.0
 RANGE_WINDOW_BARS = 480
 MIN_KLINES_BARS = 500
@@ -124,10 +125,10 @@ FROZEN_VALUES = {
     "MAX_LAYERS": 9,
     "MULTIPLIER": 1.3,
     "S": 32.01499791,
-    "MULT_DD_LT_2": 1.2,
-    "MULT_DD_2_5": 1.3,
-    "MULT_DD_5_10": 1.4,
-    "MULT_DD_10_20": 1.5,
+    "MULT_DD_LT_2": 1.0,
+    "MULT_DD_2_5": 1.0,
+    "MULT_DD_5_10": 1.0,
+    "MULT_DD_10_20": 1.0,
     "BTC_LAYER_NOTIONALS": [93.71, 121.82, 158.36, 205.87, 267.63, 347.92, 452.30, 587.99, 764.40],
     "ETH_LAYER_NOTIONALS": [62.47, 81.21, 105.58, 137.25, 178.42, 231.95, 301.53, 391.99, 509.60],
     "BTC_SPACING_COEFF": 2.0,
@@ -137,7 +138,8 @@ FROZEN_VALUES = {
     "ETH_SPACING_MIN": 0.010,
     "ETH_SPACING_MAX": 0.040,
     "GROUP_TP_PCT": 0.015,
-    "ADX_THRESHOLD": 25.0,
+    "ADX_THRESHOLD": 30.0,
+    "POSITION_THRESHOLD": 0.35,
     "ATR_MEDIAN_MULTIPLIER": 2.0,
     "RANGE_WINDOW_BARS": 480,
     "MIN_KLINES_BARS": 500,

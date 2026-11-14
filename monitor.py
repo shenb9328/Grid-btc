@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Spot Martingale Monitor (Binance Spot · Simulation DRY_RUN)
-Frozen under SPEC v5.7.
+Frozen under SPEC v5.8.
 Polls Binance public market data every 60s, executes simulation grid matching,
 and persists state to SQLite database.
 """
@@ -134,7 +134,7 @@ class SpotMartingaleMonitor:
         self.prev_valid_regime: Dict[str, Optional[str]] = {"BTCUSDT": None, "ETHUSDT": None}
 
     def startup_checks(self):
-        logger.info("Performing startup checks under SPEC v5.7...")
+        logger.info("Performing startup checks under SPEC v5.8...")
         if not config.verify_frozen_config():
             logger.error("Startup frozen configuration verification failed. Exiting immediately.")
             sys.exit(1)
@@ -184,55 +184,57 @@ class SpotMartingaleMonitor:
 
     def _check_and_execute_transition_close(self):
         """
-        Transition closing (SPEC §9 Rule 18(d)):
-        When v5.7 starts for the first time, if any legacy v5.6 OPEN group exists,
-        sell all its OPEN layers at market price (reason=TRANSITION_CLOSE),
-        cancel PENDING layers (if any), and mark group as CLOSED (close_reason=TRANSITION_CLOSE).
+        Transition closing (SPEC V5.8-4, §9 Rule 24(c)):
+        When v5.8 starts for the first time, check account.v58_transition_done.
+        If 0, sell all OPEN layers in all OPEN groups at market price (reason=TRANSITION_CLOSE),
+        cancel PENDING layers, mark groups as CLOSED (close_reason=TRANSITION_CLOSE),
+        and in the same final transaction set v58_transition_done = 1.
         Cash and realized PnL roll over; account is not reset.
-        Idempotent: does not trigger on groups already CLOSED.
+        Idempotent: when v58_transition_done == 1, no-op.
         """
         if not self.db_path.exists():
             return
         conn = engine.get_db_connection(self.db_path)
         with conn:
             cur = conn.cursor()
+            cur.execute("SELECT v58_transition_done FROM account WHERE id = 1")
+            row = cur.fetchone()
+            if not row or row["v58_transition_done"] == 1:
+                return
+
             cur.execute("SELECT * FROM grid_groups WHERE status = 'OPEN'")
             open_groups = [dict(r) for r in cur.fetchall()]
+            now_utc = datetime.now(timezone.utc)
             for grp in open_groups:
                 gid = grp["id"]
                 sym = grp["symbol"]
-                cur.execute("SELECT COUNT(*) as total_cnt, MAX(layer_no) as max_l FROM layers WHERE group_id = ?", (gid,))
-                row = cur.fetchone()
-                total_cnt = row["total_cnt"] or 0
-                max_l = row["max_l"] or 0
-                # v5.6 groups have at most 6 layers in the database
-                if total_cnt <= 6 or max_l <= 6:
-                    logger.info("Legacy v5.6 OPEN group %d (%s, total_layers=%d) detected. Executing transition close.", gid, sym, total_cnt)
-                    now_utc = datetime.now(timezone.utc)
-                    px, _ = self.client.get_ticker_price(sym)
-                    if px is None or px <= 0:
-                        cur.execute("SELECT last_valid_price FROM symbol_state WHERE symbol = ?", (sym,))
-                        s_row = cur.fetchone()
-                        px = s_row["last_valid_price"] if s_row else None
+                logger.info("Legacy OPEN group %d (%s) detected. Executing v5.8 transition close.", gid, sym)
+                px, _ = self.client.get_ticker_price(sym)
+                if px is None or px <= 0:
+                    cur.execute("SELECT last_valid_price FROM symbol_state WHERE symbol = ?", (sym,))
+                    s_row = cur.fetchone()
+                    px = s_row["last_valid_price"] if s_row else None
 
-                    cur.execute("SELECT * FROM layers WHERE group_id = ? AND status = 'OPEN' ORDER BY layer_no ASC", (gid,))
-                    open_layers = [dict(r) for r in cur.fetchall()]
+                cur.execute("SELECT * FROM layers WHERE group_id = ? AND status = 'OPEN' ORDER BY layer_no ASC", (gid,))
+                open_layers = [dict(r) for r in cur.fetchall()]
 
-                    for lay in open_layers:
-                        sell_px = px if (px is not None and px > 0) else lay["buy_price"]
-                        self._sell_layer(conn, lay, sym, sell_px, now_utc, "TRANSITION_CLOSE", layer_status="SOLD")
+                for lay in open_layers:
+                    sell_px = px if (px is not None and px > 0) else lay["buy_price"]
+                    self._sell_layer(conn, lay, sym, sell_px, now_utc, "TRANSITION_CLOSE", layer_status="SOLD")
 
-                    cur.execute("UPDATE layers SET status = 'CANCELLED' WHERE group_id = ? AND status = 'PENDING'", (gid,))
-                    cur.execute(
-                        "UPDATE grid_groups SET status = 'CLOSED', close_reason = 'TRANSITION_CLOSE', closed_utc = ? WHERE id = ?",
-                        (now_utc.isoformat(), gid)
-                    )
-                    engine.assert_cash_invariant(conn)
-                    logger.info("Legacy v5.6 group %d closed via TRANSITION_CLOSE.", gid)
+                cur.execute("UPDATE layers SET status = 'CANCELLED' WHERE group_id = ? AND status = 'PENDING'", (gid,))
+                cur.execute(
+                    "UPDATE grid_groups SET status = 'CLOSED', close_reason = 'TRANSITION_CLOSE', closed_utc = ? WHERE id = ?",
+                    (now_utc.isoformat(), gid)
+                )
+                engine.assert_cash_invariant(conn)
+                logger.info("Legacy group %d (%s) closed via TRANSITION_CLOSE.", gid, sym)
+
+            cur.execute("UPDATE account SET v58_transition_done = 1 WHERE id = 1")
         conn.close()
 
     def execute_transition_close(self):
-        """Public alias for transition close (§9 Rule 18(d))."""
+        """Public alias for transition close (SPEC V5.8-4, §9 Rule 24(c))."""
         return self._check_and_execute_transition_close()
 
     def poll_once(self, now_utc: datetime, now_monotonic: float):
@@ -628,7 +630,8 @@ class SpotMartingaleMonitor:
             cond3 = (atr is not None and atr_med is not None and atr < config.ATR_MEDIAN_MULTIPLIER * atr_med)
             ev_24h, ev_past_2h, is_stale, ev_err = engine.check_event_filter(self.events, now_utc)
             cond4 = (not ev_24h and not ev_past_2h and not is_stale)
-            allow_new = int(cond1 and cond2 and cond3 and cond4 and not block_trading[sym] and not daily_loss_blocked)
+            cond7 = bool(inds.get("pos_ok", False))
+            allow_new = int(cond1 and cond2 and cond3 and cond4 and cond7 and not block_trading[sym] and not daily_loss_blocked)
 
             cur.execute("""
                 INSERT INTO regime_log (
@@ -641,10 +644,10 @@ class SpotMartingaleMonitor:
                 int(ev_24h), int(ev_past_2h), allow_new,
                 regime, ret24, plus_di, minus_di
             ))
-            if not allow_new and not (cond1 and cond2 and cond3 and cond4):
+            if not allow_new and not (cond1 and cond2 and cond3 and cond4 and cond7):
                 self._log_risk_event(
                     conn, now_utc.isoformat(), "REGIME_BLOCK",
-                    f"{sym} blocked: adx_ok={cond1}, range_ok={cond2}, atr_ok={cond3}, event_ok={cond4}"
+                    f"{sym} blocked: adx_ok={cond1}, range_ok={cond2}, atr_ok={cond3}, event_ok={cond4}, pos_ok={cond7}"
                 )
         conn.commit()
 
@@ -666,7 +669,7 @@ class SpotMartingaleMonitor:
                 else:
                     # No open group: consider opening group if allowed
                     if not block_trading[sym] and not daily_loss_blocked and events_ok:
-                        self._consider_open_new_group(conn, sym, val_px, now_utc)
+                        self._consider_open_new_group(conn, sym, val_px, now_utc, klines=symbol_klines.get(sym))
 
         self._end_round_bookkeeping(conn, valuation_prices, now_utc, now_monotonic)
 
@@ -1060,17 +1063,16 @@ class SpotMartingaleMonitor:
             WHERE id = 1
         """, (net_cash_in, realized))
 
-    def _consider_open_new_group(self, conn: sqlite3.Connection, symbol: str, val_px: Optional[float], now_utc: datetime):
+    def _consider_open_new_group(self, conn: sqlite3.Connection, symbol: str, val_px: Optional[float], now_utc: datetime, klines: Optional[List[List[Any]]] = None):
         cur = conn.cursor()
         if val_px is None:
             return
 
-        # Fetch 500 closed bars to compute indicators
-        klines, k_err = self.client.get_recent_closed_klines(symbol, config.MIN_KLINES_BARS)
+        # Reuse klines fetched in the current round (§8.3(6), SPEC v5.8)
         if not klines or len(klines) < config.MIN_KLINES_BARS:
-            logger.warning("Cannot open new group for %s: insufficient klines (%s)", symbol, k_err)
+            logger.warning("Cannot open new group for %s: insufficient klines", symbol)
             with conn:
-                self._log_risk_event(conn, now_utc.isoformat(), "REGIME_BLOCK", f"{symbol} insufficient klines: {k_err}")
+                self._log_risk_event(conn, now_utc.isoformat(), "REGIME_BLOCK", f"{symbol} insufficient klines")
             return
 
         inds = engine.calculate_indicators(klines)
@@ -1080,9 +1082,10 @@ class SpotMartingaleMonitor:
         hh = inds["hh_480"]
         ll = inds["ll_480"]
         prev_c = inds["prev_close"]
+        pos_ok = inds.get("pos_ok", False)
 
         # Check conditions §4.1:
-        # 1. ADX < 25
+        # 1. ADX < 30
         cond1 = (adx is not None and adx < config.ADX_THRESHOLD)
         # 2. LL_480 < prev_close < HH_480
         cond2 = (hh is not None and ll is not None and prev_c is not None and ll < prev_c < hh)
@@ -1091,8 +1094,10 @@ class SpotMartingaleMonitor:
         # 4. Economic events filter
         ev_24h, ev_past_2h, is_stale, ev_err = engine.check_event_filter(self.events, now_utc)
         cond4 = (not ev_24h and not ev_past_2h and not is_stale)
+        # 7. Position filter (Position <= 0.35, SPEC v5.8)
+        cond7 = bool(pos_ok)
 
-        if not (cond1 and cond2 and cond3 and cond4):
+        if not (cond1 and cond2 and cond3 and cond4 and cond7):
             return
 
         # Check capital caps for layer 1 (§2, §3.1)
